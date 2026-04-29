@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+.python-version
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Claude Code local state
+.claude/
+CLAUDE.md.local
+
+# Training artifacts (regeneratable — keep neural_net.h + final sac_actor.zip)
+checkpoints/
+sac_actor_best_phase*.zip
+sac_actor_weights.npz
+*.tmp
+timings_*.json
+
+# Misc
+*.log

@@ -1,0 +1,237 @@
+<?xml version="1.0"?>
+<!--
+  Mini Sumo robot, primitive geometry, real-world measurements.
+
+  Frame convention:
+    base_link origin sits at the chassis-bottom plane, between the wheel
+    contact points. +X is forward, +Y is left, +Z is up. The chassis box
+    is offset upward by half its thickness so its bottom rests at z=0.
+    Wheel cylinders are rotated 90 deg about X so their axis lies along
+    the joint's rotation axis (+Y).
+
+  Real measurements:
+    Chassis box  : 75 x 100 x 50 mm,  0.4 kg
+                   (front 25 mm of the 100 mm bounding box is the
+                    wedge, NOT chassis; total robot length = 100 mm)
+    COM          : 9.6 mm behind chassis centre, 22 mm above floor
+    Wheels       : r = 14 mm, w = 18 mm, 0.05 kg each
+    Track width  : 56 mm  (Y offset = +/-28 mm)
+    Wheel base   : axle 38.7 mm behind chassis centre
+
+  A massless, frictionless 3 mm sphere is fixed under the front edge of
+  the chassis. Wheels sit only at the rear, so without it the flat front
+  underside slides on the dohyo and PyBullet's box corners snag.
+-->
+<robot name="mini_sumo">
+
+  <!-- ======================== CHASSIS ======================== -->
+  <link name="base_link">
+    <inertial>
+      <!-- COM 9.6 mm behind centre, 22 mm above floor (battery + electronics
+           are stacked toward the rear-top of the chassis). -->
+      <origin xyz="-0.0096 0.0 0.022" rpy="0 0 0"/>
+      <mass value="0.4"/>
+      <!-- Box inertia for 0.075 x 0.10 x 0.05, principal moments at COM:
+           Ixx = (m/12)*(0.10^2 + 0.05^2) = 4.167e-4
+           Iyy = (m/12)*(0.075^2 + 0.05^2) = 2.708e-4
+           Izz = (m/12)*(0.075^2 + 0.10^2) = 5.208e-4 -->
+      <inertia ixx="4.167e-4" ixy="0" ixz="0"
+               iyy="2.708e-4" iyz="0"
+               izz="5.208e-4"/>
+    </inertial>
+
+    <visual>
+      <!-- Box centred on base_link X=0; bottom rests at z = 0.
+           Chassis front face is at x = +0.0375, leaving room for
+           the 25 mm wedge in the front 25 mm of the bounding box. -->
+      <origin xyz="0 0 0.025" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.075 0.1 0.05"/>
+      </geometry>
+      <material name="red">
+        <color rgba="0.85 0.15 0.15 1.0"/>
+      </material>
+    </visual>
+
+    <collision>
+      <origin xyz="0 0 0.025" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.075 0.1 0.05"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <!-- ============== FRONT CASTER (invisible slider) ========== -->
+  <!-- Tiny frictionless sphere fixed under the front edge of the
+       chassis. It carries no real load (negligible mass) and exists
+       purely so the chassis nose rolls instead of catching on its
+       own box corners during forward motion. -->
+  <link name="front_caster">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="0.001"/>
+      <inertia ixx="1e-9" ixy="0" ixz="0"
+               iyy="1e-9" iyz="0"
+               izz="1e-9"/>
+    </inertial>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <sphere radius="0.003"/>
+      </geometry>
+    </collision>
+    <!-- No <visual> tag → invisible in the GUI. -->
+    <contact>
+      <lateral_friction value="0.0"/>
+      <rolling_friction value="0.0"/>
+      <spinning_friction value="0.0"/>
+    </contact>
+  </link>
+
+  <joint name="front_caster_joint" type="fixed">
+    <parent link="base_link"/>
+    <child  link="front_caster"/>
+    <!-- 5 mm in from the front edge, on the floor plane (sphere
+         radius lifts it just into contact). -->
+    <origin xyz="0.045 0.0 0.003" rpy="0 0 0"/>
+  </joint>
+
+  <!-- ====================== NOSE WEDGE ======================= -->
+  <!-- Sharp scoop blade in the front 25 mm of the bounding box.
+       The chassis box ends at x = +0.0375; the wedge then spans
+       from there to x = +0.0625, so the robot's total length stays
+       at 100 mm (mini-sumo legal).
+       Slope geometry (in body frame):
+           trailing edge (top) : x = +0.0375,  z = 0.0100
+           leading edge (tip)  : x = +0.0625,  z = 0.0004
+           slope length = 0.0268 m
+           pitch (about Y) = atan2(0.0096, 0.025) = 0.3672 rad (~21 deg) -->
+  <link name="nose_wedge">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="0.02"/>
+      <!-- Thin slab inertia for box (0.0268 x 0.10 x 0.002), m=0.02.
+           Iyy nudged up from the computed 1.20e-6 so the principal-
+           moment triangle inequality (Ixx+Iyy >= Izz) holds with
+           margin under PyBullet's strict check. -->
+      <inertia ixx="1.667e-5" ixy="0" ixz="0"
+               iyy="1.5e-6"   iyz="0"
+               izz="1.786e-5"/>
+    </inertial>
+
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <!-- slope-length x chassis-width x thin -->
+        <box size="0.0268 0.10 0.002"/>
+      </geometry>
+      <material name="silver">
+        <color rgba="0.75 0.75 0.78 1.0"/>
+      </material>
+    </visual>
+
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.0268 0.10 0.002"/>
+      </geometry>
+    </collision>
+
+    <contact>
+      <!-- Slick face so it slides under the opponent rather than grabbing. -->
+      <lateral_friction value="0.3"/>
+    </contact>
+  </link>
+
+  <joint name="nose_wedge_joint" type="fixed">
+    <parent link="base_link"/>
+    <child  link="nose_wedge"/>
+    <!-- Slab centre at the midpoint of top & bottom edges, rotated so
+         its long axis runs down-slope. -->
+    <origin xyz="0.0500 0.0 0.0052" rpy="0 0.3672 0"/>
+  </joint>
+
+  <!-- ===================== LEFT WHEEL ======================== -->
+  <link name="left_wheel">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="0.05"/>
+      <!-- Cylinder, axis along link +Y after the 90 deg roll:
+           Iyy (rolling axis) = 0.5*m*r^2                  = 4.900e-6
+           Ixx = Izz          = (m/12)*(3*r^2 + h^2)       = 3.800e-6 -->
+      <inertia ixx="3.800e-6" ixy="0" ixz="0"
+               iyy="4.900e-6" iyz="0"
+               izz="3.800e-6"/>
+    </inertial>
+
+    <visual>
+      <!-- Roll 90 deg so the cylinder lies on its side and rolls about Y. -->
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry>
+        <cylinder radius="0.014" length="0.018"/>
+      </geometry>
+      <material name="black">
+        <color rgba="0.05 0.05 0.05 1.0"/>
+      </material>
+    </visual>
+
+    <collision>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry>
+        <cylinder radius="0.014" length="0.018"/>
+      </geometry>
+    </collision>
+
+    <!-- PyBullet contact-friction extension (also reinforced via
+         p.changeDynamics on load to be tool-agnostic). -->
+    <contact>
+      <lateral_friction value="1.0"/>
+    </contact>
+  </link>
+
+  <joint name="left_wheel_joint" type="continuous">
+    <parent link="base_link"/>
+    <child  link="left_wheel"/>
+    <!-- 38.7 mm behind centre, +28 mm to the left, axle 14 mm above floor. -->
+    <origin xyz="-0.0387 0.028 0.014" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+  </joint>
+
+  <!-- ===================== RIGHT WHEEL ======================= -->
+  <link name="right_wheel">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="0.05"/>
+      <inertia ixx="3.800e-6" ixy="0" ixz="0"
+               iyy="4.900e-6" iyz="0"
+               izz="3.800e-6"/>
+    </inertial>
+
+    <visual>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry>
+        <cylinder radius="0.014" length="0.018"/>
+      </geometry>
+      <material name="black"/>
+    </visual>
+
+    <collision>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry>
+        <cylinder radius="0.014" length="0.018"/>
+      </geometry>
+    </collision>
+
+    <contact>
+      <lateral_friction value="1.0"/>
+    </contact>
+  </link>
+
+  <joint name="right_wheel_joint" type="continuous">
+    <parent link="base_link"/>
+    <child  link="right_wheel"/>
+    <origin xyz="-0.0387 -0.028 0.014" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+  </joint>
+
+</robot>
