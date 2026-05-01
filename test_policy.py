@@ -19,7 +19,7 @@ from stable_baselines3 import SAC
 from sumo_env import MiniSumoEnv
 
 
-MODEL_PATH = Path(__file__).with_name("sac_actor_novamax.zip")
+MODEL_PATH = Path(__file__).with_name("sac_actor_novamax_v2.zip")
 EPISODES = 30
 
 

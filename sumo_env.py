@@ -44,10 +44,10 @@ DOHYO_THICKNESS = 0.02
 BLACK_TOP_THICKNESS = DOHYO_THICKNESS * 0.05
 DOHYO_TOP_Z = DOHYO_THICKNESS + BLACK_TOP_THICKNESS
 
-ROBOT_WIDTH = 0.10
-ROBOT_FRONT_EXTENT = 0.0625
-WHEEL_RADIUS = 0.014
-WHEEL_TRACK_HALF = 0.028
+ROBOT_WIDTH = 0.098
+ROBOT_FRONT_EXTENT = 0.0496
+WHEEL_RADIUS = 0.010
+WHEEL_TRACK_HALF = 0.0401
 ROBOT_URDF = os.path.join(os.path.dirname(__file__), "robot.urdf")
 
 # Novamax Professional Mini Sumo Kit (opponent).
@@ -93,11 +93,11 @@ INITIAL_CHARGE_MS = 500
 INITIAL_CHARGE_TICKS = int(round((INITIAL_CHARGE_MS / 1000.0) / SIM_TIMESTEP))
 
 # --- Hyper-realistic motor physics --------------------------------
-# Agent motors: N20 12 V, 95 RPM, 1.2 kg·cm stall torque.
-#   max angular vel = 95 * 2*pi / 60 = 9.948 rad/s
-#   max stall force = 0.12 N·m
-AGENT_MAX_RAD = 9.95
-AGENT_MAX_FORCE = 0.12
+# Agent motors: N20 12 V, 400 RPM, 0.5 kg·cm stall torque.
+#   max angular vel = 400 * 2*pi / 60 = 41.888 rad/s
+#   max stall force = 0.05 N·m
+AGENT_MAX_RAD = 41.88
+AGENT_MAX_FORCE = 0.05
 
 # NovaMax motors: 16 mm gearmotor, 800 RPM, ~5 kg·cm stall torque.
 #   max angular vel = 800 * 2*pi / 60 = 83.776 rad/s
@@ -509,12 +509,30 @@ class MiniSumoEnv(gym.Env):
         return math.hypot(wx, wy) > INNER_RADIUS
 
     def _raw_distances(self) -> list[Optional[float]]:
-        front_offset = ROBOT_FRONT_EXTENT + 0.005
-        side_offset = ROBOT_WIDTH / 2.0 + 0.005
+        # All three VL53L1X sensors mounted near the front of the chassis
+        # (x ≈ 0.040, just behind the wedge tip), pointing forward in a
+        # 60° cone: the front sensor straight ahead, the side sensors
+        # angled 30° outward to the left and right.
+        sensor_x = 0.040
+        sensor_y = 0.0
+        cos30 = math.cos(math.radians(30.0))
+        sin30 = math.sin(math.radians(30.0))
         readings: list[Optional[float]] = [
-            self._ray_distance(self.robot_id, 1.0, 0.0, front_offset, ENEMY_FAR_DIST),
-            self._ray_distance(self.robot_id, 0.0, 1.0, side_offset, ENEMY_FAR_DIST),
-            self._ray_distance(self.robot_id, 0.0, -1.0, side_offset, ENEMY_FAR_DIST),
+            # front: yaw + 0
+            self._ray_from_body_point(
+                self.robot_id, sensor_x, sensor_y,
+                1.0, 0.0, ENEMY_FAR_DIST,
+            ),
+            # left: yaw + 30°
+            self._ray_from_body_point(
+                self.robot_id, sensor_x, sensor_y,
+                cos30, sin30, ENEMY_FAR_DIST,
+            ),
+            # right: yaw - 30°
+            self._ray_from_body_point(
+                self.robot_id, sensor_x, sensor_y,
+                cos30, -sin30, ENEMY_FAR_DIST,
+            ),
         ]
         if self._disabled_sensor is not None:
             readings[self._disabled_sensor] = None

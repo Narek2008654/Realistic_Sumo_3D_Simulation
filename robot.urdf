@@ -1,52 +1,53 @@
 <?xml version="1.0"?>
 <!--
-  Mini Sumo robot, primitive geometry, real-world measurements.
+  Mini Sumo agent — 400 RPM upgrade.
 
   Frame convention:
-    base_link origin sits at the chassis-bottom plane, between the wheel
-    contact points. +X is forward, +Y is left, +Z is up. The chassis box
-    is offset upward by half its thickness so its bottom rests at z=0.
-    Wheel cylinders are rotated 90 deg about X so their axis lies along
-    the joint's rotation axis (+Y).
+    base_link origin sits at the centre of the 99.25 × 98 mm footprint,
+    on the floor plane. +X is forward, +Y is left, +Z is up.
 
-  Real measurements:
-    Chassis box  : 75 x 100 x 50 mm,  0.4 kg
-                   (front 25 mm of the 100 mm bounding box is the
-                    wedge, NOT chassis; total robot length = 100 mm)
-    COM          : 9.6 mm behind chassis centre, 22 mm above floor
-    Wheels       : r = 14 mm, w = 18 mm, 0.05 kg each
-    Track width  : 56 mm  (Y offset = +/-28 mm)
-    Wheel base   : axle 38.7 mm behind chassis centre
+  Outer dimensions:
+    Total length (X) : 99.25 mm   ( front +0.0496, rear -0.0496 )
+    Total width  (Y) : 98 mm      ( ±0.049 )
+    Chassis box      : 82.2 × 98 × 40 mm  ( -0.0496 ≤ x ≤ +0.0326 )
+    Wedge            : 17 mm long, slope 0.5 mm tip → 10 mm trailing edge
 
-  A massless, frictionless 3 mm sphere is fixed under the front edge of
-  the chassis. Wheels sit only at the rear, so without it the flat front
-  underside slides on the dohyo and PyBullet's box corners snag.
+  Mass / CoM:
+    Total                    : 0.45 kg
+    CoM (relative to origin) : x = +0.0016 m  (48 mm behind the front tip)
+                                y = 0
+                                z = 0.007 m   (7 mm above floor)
+
+  Wheels:
+    Diameter 20 mm (r=0.010), width 19 mm. Track width 80.2 mm
+    (axles at y = ±0.0401). Axle z = 0.010 so the chassis rides extremely
+    low. Mounted near the rear at x = -0.025.
 -->
 <robot name="mini_sumo">
 
   <!-- ======================== CHASSIS ======================== -->
   <link name="base_link">
     <inertial>
-      <!-- COM 9.6 mm behind centre, 22 mm above floor (battery + electronics
-           are stacked toward the rear-top of the chassis). -->
-      <origin xyz="-0.0096 0.0 0.022" rpy="0 0 0"/>
-      <mass value="0.4"/>
-      <!-- Box inertia for 0.075 x 0.10 x 0.05, principal moments at COM:
-           Ixx = (m/12)*(0.10^2 + 0.05^2) = 4.167e-4
-           Iyy = (m/12)*(0.075^2 + 0.05^2) = 2.708e-4
-           Izz = (m/12)*(0.075^2 + 0.10^2) = 5.208e-4 -->
-      <inertia ixx="4.167e-4" ixy="0" ixz="0"
-               iyy="2.708e-4" iyz="0"
-               izz="5.208e-4"/>
+      <!-- CoM 48 mm behind the front tip (= +0.0496 - 0.048 = +0.0016)
+           and 7 mm above the floor; mass 0.45 kg. -->
+      <origin xyz="0.0016 0.0 0.007" rpy="0 0 0"/>
+      <mass value="0.45"/>
+      <!-- Chassis-box principal moments at 0.45 kg:
+           Ixx = (m/12)*(W^2 + H^2) = 4.20e-4
+           Iyy = (m/12)*(L^2 + H^2) = 3.13e-4
+           Izz = (m/12)*(L^2 + W^2) = 6.14e-4 -->
+      <inertia ixx="4.20e-4" ixy="0" ixz="0"
+               iyy="3.13e-4" iyz="0"
+               izz="6.14e-4"/>
     </inertial>
 
     <visual>
-      <!-- Box centred on base_link X=0; bottom rests at z = 0.
-           Chassis front face is at x = +0.0375, leaving room for
-           the 25 mm wedge in the front 25 mm of the bounding box. -->
-      <origin xyz="0 0 0.025" rpy="0 0 0"/>
+      <!-- Chassis box centred between the rear face (-0.0496) and the
+           wedge boundary (+0.0326) -> centre x = -0.0085. Bottom rests
+           at z = 0 (wheels share that contact plane). -->
+      <origin xyz="-0.0085 0.0 0.020" rpy="0 0 0"/>
       <geometry>
-        <box size="0.075 0.1 0.05"/>
+        <box size="0.0822 0.098 0.040"/>
       </geometry>
       <material name="red">
         <color rgba="0.85 0.15 0.15 1.0"/>
@@ -54,18 +55,14 @@
     </visual>
 
     <collision>
-      <origin xyz="0 0 0.025" rpy="0 0 0"/>
+      <origin xyz="-0.0085 0.0 0.020" rpy="0 0 0"/>
       <geometry>
-        <box size="0.075 0.1 0.05"/>
+        <box size="0.0822 0.098 0.040"/>
       </geometry>
     </collision>
   </link>
 
   <!-- ============== FRONT CASTER (invisible slider) ========== -->
-  <!-- Tiny frictionless sphere fixed under the front edge of the
-       chassis. It carries no real load (negligible mass) and exists
-       purely so the chassis nose rolls instead of catching on its
-       own box corners during forward motion. -->
   <link name="front_caster">
     <inertial>
       <origin xyz="0 0 0" rpy="0 0 0"/>
@@ -80,7 +77,6 @@
         <sphere radius="0.003"/>
       </geometry>
     </collision>
-    <!-- No <visual> tag → invisible in the GUI. -->
     <contact>
       <lateral_friction value="0.0"/>
       <rolling_friction value="0.0"/>
@@ -91,39 +87,34 @@
   <joint name="front_caster_joint" type="fixed">
     <parent link="base_link"/>
     <child  link="front_caster"/>
-    <!-- 5 mm in from the front edge, on the floor plane (sphere
-         radius lifts it just into contact). -->
-    <origin xyz="0.045 0.0 0.003" rpy="0 0 0"/>
+    <!-- Just behind the wedge mount, under the chassis bottom edge so
+         the chassis nose can't snag if it tips forward. -->
+    <origin xyz="0.025 0.0 0.003" rpy="0 0 0"/>
   </joint>
 
   <!-- ====================== NOSE WEDGE ======================= -->
-  <!-- Sharp scoop blade in the front 25 mm of the bounding box.
-       The chassis box ends at x = +0.0375; the wedge then spans
-       from there to x = +0.0625, so the robot's total length stays
-       at 100 mm (mini-sumo legal).
-       Slope geometry (in body frame):
-           trailing edge (top) : x = +0.0375,  z = 0.0100
-           leading edge (tip)  : x = +0.0625,  z = 0.0004
-           slope length = 0.0268 m
-           pitch (about Y) = atan2(0.0096, 0.025) = 0.3672 rad (~21 deg) -->
+  <!-- Slab geometry (in body frame):
+         trailing edge (top, joins chassis) : x = +0.0326,  z = 0.010
+         leading edge (sharp tip)           : x = +0.0496,  z = 0.0005
+         slope length  = sqrt(17^2 + 9.5^2) = 19.48 mm
+         pitch (about Y) = atan2(9.5, 17) = 0.5101 rad (~29 deg) -->
   <link name="nose_wedge">
     <inertial>
       <origin xyz="0 0 0" rpy="0 0 0"/>
       <mass value="0.02"/>
-      <!-- Thin slab inertia for box (0.0268 x 0.10 x 0.002), m=0.02.
-           Iyy nudged up from the computed 1.20e-6 so the principal-
-           moment triangle inequality (Ixx+Iyy >= Izz) holds with
-           margin under PyBullet's strict check. -->
-      <inertia ixx="1.667e-5" ixy="0" ixz="0"
+      <!-- Slab inertia for box (0.01948 x 0.098 x 0.002), m=0.02.
+           Iyy bumped from computed 6.4e-7 to 1.5e-6 to give margin
+           under PyBullet's strict triangle inequality. -->
+      <inertia ixx="1.601e-5" ixy="0" ixz="0"
                iyy="1.5e-6"   iyz="0"
-               izz="1.786e-5"/>
+               izz="1.664e-5"/>
     </inertial>
 
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
       <geometry>
-        <!-- slope-length x chassis-width x thin -->
-        <box size="0.0268 0.10 0.002"/>
+        <!-- slope-length × chassis-width × thin -->
+        <box size="0.01948 0.098 0.002"/>
       </geometry>
       <material name="silver">
         <color rgba="0.75 0.75 0.78 1.0"/>
@@ -133,7 +124,7 @@
     <collision>
       <origin xyz="0 0 0" rpy="0 0 0"/>
       <geometry>
-        <box size="0.0268 0.10 0.002"/>
+        <box size="0.01948 0.098 0.002"/>
       </geometry>
     </collision>
 
@@ -146,33 +137,32 @@
   <joint name="nose_wedge_joint" type="fixed">
     <parent link="base_link"/>
     <child  link="nose_wedge"/>
-    <!-- Slab centre lifted by ~0.6 mm so the leading-edge bottom corner
-         touches z=0 exactly. With pitch 0.3672 rad and 2 mm thickness,
-         the bottom of the leading tip sits at:
-             z = origin_z + 0.0134*(-sin(p)) + (-0.001)*cos(p)
-         Solving for z = 0 gives origin_z ≈ 0.00576. This lets opponents
-         ramp smoothly up the wedge in PyBullet's collision pass. -->
-    <origin xyz="0.0500 0.0 0.0058" rpy="0 0.3672 0"/>
+    <!-- Slab centre at the midpoint of trailing and leading edges,
+         rotated so its long axis runs down-slope. With pitch 0.5101 rad
+         and 2 mm thickness, an origin z of 0.0061 places the leading-
+         edge bottom corner at z ≈ 0.0005 (the spec'd lowest Z). -->
+    <origin xyz="0.0411 0.0 0.0061" rpy="0 0.5101 0"/>
   </joint>
 
   <!-- ===================== LEFT WHEEL ======================== -->
   <link name="left_wheel">
     <inertial>
       <origin xyz="0 0 0" rpy="0 0 0"/>
-      <mass value="0.05"/>
-      <!-- Cylinder, axis along link +Y after the 90 deg roll:
-           Iyy (rolling axis) = 0.5*m*r^2                  = 4.900e-6
-           Ixx = Izz          = (m/12)*(3*r^2 + h^2)       = 3.800e-6 -->
-      <inertia ixx="3.800e-6" ixy="0" ixz="0"
-               iyy="4.900e-6" iyz="0"
-               izz="3.800e-6"/>
+      <mass value="0.025"/>
+      <!-- Cylinder, r=0.010, h=0.019, axis along link +Y after the
+           90 deg roll:
+             Iyy (rolling)        = 0.5*m*r^2                = 1.25e-6
+             Ixx = Izz            = (m/12)*(3*r^2 + h^2)     = 1.378e-6 -->
+      <inertia ixx="1.378e-6" ixy="0" ixz="0"
+               iyy="1.25e-6"  iyz="0"
+               izz="1.378e-6"/>
     </inertial>
 
     <visual>
       <!-- Roll 90 deg so the cylinder lies on its side and rolls about Y. -->
       <origin xyz="0 0 0" rpy="1.5708 0 0"/>
       <geometry>
-        <cylinder radius="0.014" length="0.018"/>
+        <cylinder radius="0.010" length="0.019"/>
       </geometry>
       <material name="black">
         <color rgba="0.05 0.05 0.05 1.0"/>
@@ -182,12 +172,10 @@
     <collision>
       <origin xyz="0 0 0" rpy="1.5708 0 0"/>
       <geometry>
-        <cylinder radius="0.014" length="0.018"/>
+        <cylinder radius="0.010" length="0.019"/>
       </geometry>
     </collision>
 
-    <!-- PyBullet contact-friction extension (also reinforced via
-         p.changeDynamics on load to be tool-agnostic). -->
     <contact>
       <lateral_friction value="1.0"/>
     </contact>
@@ -196,8 +184,9 @@
   <joint name="left_wheel_joint" type="continuous">
     <parent link="base_link"/>
     <child  link="left_wheel"/>
-    <!-- 38.7 mm behind centre, +28 mm to the left, axle 14 mm above floor. -->
-    <origin xyz="-0.0387 0.028 0.014" rpy="0 0 0"/>
+    <!-- Axle 25 mm behind centre, +40.1 mm to the left, 10 mm above
+         floor so the chassis rides very low. -->
+    <origin xyz="-0.025 0.0401 0.010" rpy="0 0 0"/>
     <axis xyz="0 1 0"/>
   </joint>
 
@@ -205,16 +194,16 @@
   <link name="right_wheel">
     <inertial>
       <origin xyz="0 0 0" rpy="0 0 0"/>
-      <mass value="0.05"/>
-      <inertia ixx="3.800e-6" ixy="0" ixz="0"
-               iyy="4.900e-6" iyz="0"
-               izz="3.800e-6"/>
+      <mass value="0.025"/>
+      <inertia ixx="1.378e-6" ixy="0" ixz="0"
+               iyy="1.25e-6"  iyz="0"
+               izz="1.378e-6"/>
     </inertial>
 
     <visual>
       <origin xyz="0 0 0" rpy="1.5708 0 0"/>
       <geometry>
-        <cylinder radius="0.014" length="0.018"/>
+        <cylinder radius="0.010" length="0.019"/>
       </geometry>
       <material name="black"/>
     </visual>
@@ -222,7 +211,7 @@
     <collision>
       <origin xyz="0 0 0" rpy="1.5708 0 0"/>
       <geometry>
-        <cylinder radius="0.014" length="0.018"/>
+        <cylinder radius="0.010" length="0.019"/>
       </geometry>
     </collision>
 
@@ -234,7 +223,7 @@
   <joint name="right_wheel_joint" type="continuous">
     <parent link="base_link"/>
     <child  link="right_wheel"/>
-    <origin xyz="-0.0387 -0.028 0.014" rpy="0 0 0"/>
+    <origin xyz="-0.025 -0.0401 0.010" rpy="0 0 0"/>
     <axis xyz="0 1 0"/>
   </joint>
 
