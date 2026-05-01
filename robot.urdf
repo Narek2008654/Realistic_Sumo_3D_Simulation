@@ -146,9 +146,13 @@
   <joint name="nose_wedge_joint" type="fixed">
     <parent link="base_link"/>
     <child  link="nose_wedge"/>
-    <!-- Slab centre at the midpoint of top & bottom edges, rotated so
-         its long axis runs down-slope. -->
-    <origin xyz="0.0500 0.0 0.0052" rpy="0 0.3672 0"/>
+    <!-- Slab centre lifted by ~0.6 mm so the leading-edge bottom corner
+         touches z=0 exactly. With pitch 0.3672 rad and 2 mm thickness,
+         the bottom of the leading tip sits at:
+             z = origin_z + 0.0134*(-sin(p)) + (-0.001)*cos(p)
+         Solving for z = 0 gives origin_z ≈ 0.00576. This lets opponents
+         ramp smoothly up the wedge in PyBullet's collision pass. -->
+    <origin xyz="0.0500 0.0 0.0058" rpy="0 0.3672 0"/>
   </joint>
 
   <!-- ===================== LEFT WHEEL ======================== -->

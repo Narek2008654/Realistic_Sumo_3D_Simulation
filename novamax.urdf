@@ -1,0 +1,212 @@
+<?xml version="1.0"?>
+<!--
+  Novamax Professional Mini Sumo Kit (primitive URDF, generated from spec).
+
+  Frame convention:
+    base_link origin sits at the chassis-bottom plane, between the wheel
+    contact points. +X is forward, +Y is left, +Z is up. Wheel cylinders
+    are rotated 90 deg about X so their roll axis lies along the joint's
+    rotation axis (+Y).
+
+  Spec (lighter steel, low CoM, fast 800 RPM gearmotors):
+    Chassis  : steel box, 99 x 90 x 35 mm, 0.38 kg
+               COM 1.5 cm behind centre, 1.0 cm above floor
+    Plow     : sharp steel wedge, 14 mm slope length, ~44 deg pitch, 0.02 kg
+    Wheels   : silicone, r = 16.5 mm, w = 20 mm, 0.025 kg each
+               track width 68 mm, axle 30 mm behind centre
+    Total    : 0.45 kg (high momentum at 800 RPM)
+-->
+<robot name="novamax">
+
+  <!-- ======================== CHASSIS ======================== -->
+  <link name="base_link">
+    <inertial>
+      <!-- COM 15 mm behind centre, 10 mm above floor (heavy battery /
+           gearbox stack low and to the rear). -->
+      <origin xyz="-0.015 0.0 0.010" rpy="0 0 0"/>
+      <mass value="0.38"/>
+      <!-- Box principal moments at COM for 0.099 x 0.090 x 0.035, m=0.38:
+           Ixx = (m/12)*(0.090^2 + 0.035^2) = 2.95e-4
+           Iyy = (m/12)*(0.099^2 + 0.035^2) = 3.49e-4
+           Izz = (m/12)*(0.099^2 + 0.090^2) = 5.67e-4 -->
+      <inertia ixx="2.95e-4" ixy="0" ixz="0"
+               iyy="3.49e-4" iyz="0"
+               izz="5.67e-4"/>
+    </inertial>
+
+    <visual>
+      <origin xyz="0 0 0.0175" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.099 0.090 0.035"/>
+      </geometry>
+      <material name="steel">
+        <color rgba="0.55 0.55 0.60 1.0"/>
+      </material>
+    </visual>
+
+    <collision>
+      <origin xyz="0 0 0.0175" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.099 0.090 0.035"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <!-- ============== FRONT CASTER (invisible slider) ========== -->
+  <link name="front_caster">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="0.001"/>
+      <inertia ixx="1e-9" ixy="0" ixz="0"
+               iyy="1e-9" iyz="0"
+               izz="1e-9"/>
+    </inertial>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <sphere radius="0.003"/>
+      </geometry>
+    </collision>
+    <contact>
+      <lateral_friction value="0.0"/>
+      <rolling_friction value="0.0"/>
+      <spinning_friction value="0.0"/>
+    </contact>
+  </link>
+
+  <joint name="front_caster_joint" type="fixed">
+    <parent link="base_link"/>
+    <child  link="front_caster"/>
+    <origin xyz="0.040 0.0 0.003" rpy="0 0 0"/>
+  </joint>
+
+  <!-- ======================= PLOW WEDGE ====================== -->
+  <!-- Slab geometry (in body frame):
+         trailing edge (top) : x = +0.0495, z = 0.0100
+         leading edge (tip)  : x = +0.0595, z = 0.0004
+         slope length        : 0.01386
+         pitch (about Y)     : atan2(0.0096, 0.010) = 0.764 rad (~44 deg) -->
+  <link name="plow">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="0.02"/>
+      <!-- Slab inertia for box 0.01386 x 0.090 x 0.002, m=0.02.
+           Iyy bumped from computed 3.34e-7 to 1e-6 to give margin under
+           PyBullet's strict triangle inequality (Ixx + Iyy >= Izz). -->
+      <inertia ixx="1.351e-5" ixy="0" ixz="0"
+               iyy="1e-6"     iyz="0"
+               izz="1.383e-5"/>
+    </inertial>
+
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.01386 0.090 0.002"/>
+      </geometry>
+      <material name="dark_steel">
+        <color rgba="0.30 0.30 0.32 1.0"/>
+      </material>
+    </visual>
+
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.01386 0.090 0.002"/>
+      </geometry>
+    </collision>
+
+    <contact>
+      <!-- Slick face so it slides under the opponent rather than grabbing. -->
+      <lateral_friction value="0.3"/>
+    </contact>
+  </link>
+
+  <joint name="plow_joint" type="fixed">
+    <parent link="base_link"/>
+    <child  link="plow"/>
+    <!-- Slab centred at the midpoint of trailing & leading edges, rotated
+         so its long axis runs down-slope. -->
+    <origin xyz="0.0545 0.0 0.0052" rpy="0 0.764 0"/>
+  </joint>
+
+  <!-- ======================= LEFT WHEEL ====================== -->
+  <link name="left_wheel">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="0.025"/>
+      <!-- Cylinder, axis along link +Y after the 90 deg roll:
+           Iyy (rolling axis) = 0.5*m*r^2                  = 3.40e-6
+           Ixx = Izz          = (m/12)*(3*r^2 + h^2)       = 2.535e-6 -->
+      <inertia ixx="2.535e-6" ixy="0" ixz="0"
+               iyy="3.40e-6"  iyz="0"
+               izz="2.535e-6"/>
+    </inertial>
+
+    <visual>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry>
+        <cylinder radius="0.0165" length="0.020"/>
+      </geometry>
+      <material name="silicone">
+        <color rgba="0.10 0.10 0.10 1.0"/>
+      </material>
+    </visual>
+
+    <collision>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry>
+        <cylinder radius="0.0165" length="0.020"/>
+      </geometry>
+    </collision>
+
+    <contact>
+      <lateral_friction value="1.4"/>
+    </contact>
+  </link>
+
+  <joint name="left_wheel_joint" type="continuous">
+    <parent link="base_link"/>
+    <child  link="left_wheel"/>
+    <!-- 30 mm behind centre, +34 mm to the left, axle 16.5 mm above floor. -->
+    <origin xyz="-0.030 0.034 0.0165" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+  </joint>
+
+  <!-- ====================== RIGHT WHEEL ====================== -->
+  <link name="right_wheel">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="0.025"/>
+      <inertia ixx="2.535e-6" ixy="0" ixz="0"
+               iyy="3.40e-6"  iyz="0"
+               izz="2.535e-6"/>
+    </inertial>
+
+    <visual>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry>
+        <cylinder radius="0.0165" length="0.020"/>
+      </geometry>
+      <material name="silicone"/>
+    </visual>
+
+    <collision>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry>
+        <cylinder radius="0.0165" length="0.020"/>
+      </geometry>
+    </collision>
+
+    <contact>
+      <lateral_friction value="1.4"/>
+    </contact>
+  </link>
+
+  <joint name="right_wheel_joint" type="continuous">
+    <parent link="base_link"/>
+    <child  link="right_wheel"/>
+    <origin xyz="-0.030 -0.034 0.0165" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+  </joint>
+
+</robot>

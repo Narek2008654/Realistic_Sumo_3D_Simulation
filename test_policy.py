@@ -1,9 +1,9 @@
 """Run the trained SAC policy in the GUI to watch how it plays.
 
-Loads ``sac_actor.zip`` (saved by ``train.py``) and runs ``MiniSumoEnv``
-with ``gui=True`` using the deterministic mean action (``tanh(mu)``),
-i.e. no exploration noise. Domain randomization stays on so you see
-behaviour under realistic noise.
+Loads ``sac_actor_novamax.zip`` (saved by ``train_novamax.py``) and runs
+``MiniSumoEnv`` with ``gui=True`` using the deterministic mean action
+(``tanh(mu)``), i.e. no exploration noise. Domain randomisation stays on
+so you see behaviour under realistic noise.
 """
 
 from __future__ import annotations
@@ -19,17 +19,17 @@ from stable_baselines3 import SAC
 from sumo_env import MiniSumoEnv
 
 
-MODEL_PATH = Path(__file__).with_name("sac_actor.zip")
+MODEL_PATH = Path(__file__).with_name("sac_actor_novamax.zip")
 EPISODES = 30
 
 
 def main() -> None:
     if not MODEL_PATH.exists():
         raise FileNotFoundError(
-            f"{MODEL_PATH.name} not found — run train.py first to generate it."
+            f"{MODEL_PATH.name} not found — run train_novamax.py first."
         )
 
-    env = MiniSumoEnv(gui=True, seed=0, enemy_torque_multiplier=3.0)
+    env = MiniSumoEnv(gui=True, seed=0, novamax_level=3)
     model = SAC.load(str(MODEL_PATH), device="cpu")
 
     wins = losses = 0
@@ -57,7 +57,7 @@ def main() -> None:
                 episode_return += reward
                 steps += 1
 
-            won = episode_return > 50.0
+            won = episode_return > 500.0
             outcome = "WIN " if won else "LOSE"
             if won:
                 wins += 1

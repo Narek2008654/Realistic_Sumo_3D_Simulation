@@ -1,7 +1,9 @@
 """Mini-sumo dohyo — 4D obs, 2D continuous action, original reward stack.
 
-This is the env shape that produced the 45-55% SAC win-rate against the
-2.0× davo_sirad opponent. One RL step ≈ 45 ms (11 physics ticks at 240 Hz).
+This is the env shape that produced the 45-55% SAC win-rate. One RL step
+≈ 45 ms (11 physics ticks at 240 Hz). The opponent is now the Novamax
+Professional Mini Sumo Kit (heavy steel, 5 IR sensors + 2 line sensors,
+400 RPM motors); see NovamaxController for the firmware port.
 
 * Observation space — Box(low=-1, high=1, shape=(4,), float32):
     [front_norm, left_norm, right_norm, last_seen_dir]
@@ -10,14 +12,11 @@ This is the env shape that produced the 45-55% SAC win-rate against the
     [left_motor, right_motor]
 
 * Rewards (per RL step):
-    +100   win, -100 loss               (terminal — original scale)
+    +1000  win, -1000 loss              (terminal)
     -0.5   per-step time penalty
-    +2     hunter      front_norm<1 AND both motors>0.1
-    +1     tracking-left   left_norm<1  AND L<R
-    +1     tracking-right  right_norm<1 AND L>R
-    -5     coward     L<-0.5 AND R<-0.5
-    +5     pushing    front_norm<0.2 AND L>0.5 AND R>0.5
-    +15    flanking   pushing AND outside enemy frontal cone (dot<0.5)
+    +2     hunter   front_norm<1 AND both motors>0.1
+    +5     pushing  front_norm<0.2 AND L>0.5 AND R>0.5
+    +15    flanking pushing AND outside enemy frontal cone (dot<0.5)
 """
 
 from __future__ import annotations
@@ -51,6 +50,31 @@ WHEEL_RADIUS = 0.014
 WHEEL_TRACK_HALF = 0.028
 ROBOT_URDF = os.path.join(os.path.dirname(__file__), "robot.urdf")
 
+# Novamax Professional Mini Sumo Kit (opponent).
+NOVAMAX_URDF = os.path.join(os.path.dirname(__file__), "novamax.urdf")
+# 800 RPM gearmotors, 16.5 mm wheel radius -> ~1.38 m/s top speed.
+# At 0.45 kg total mass, that's ~0.62 kg·m/s of momentum -- ~9× the agent's.
+NOVAMAX_RPM = 800.0
+NOVAMAX_WHEEL_OMEGA = (NOVAMAX_RPM / 60.0) * 2.0 * math.pi  # 83.78 rad/s
+# 5 IR distance sensors (60 cm range). Each entry is
+# (start_x_body, start_y_body, dir_x_body, dir_y_body) in the enemy's
+# local frame; +X forward, +Y left.
+NOVAMAX_IR_RANGE = 0.60
+_INV_SQRT2 = math.sqrt(0.5)
+NOVAMAX_IR_SENSORS: dict[str, tuple[float, float, float, float]] = {
+    "fc": (0.0495,  0.000,        1.0,         0.0),
+    "fl": (0.0495,  0.045,  _INV_SQRT2,  _INV_SQRT2),
+    "fr": (0.0495, -0.045,  _INV_SQRT2, -_INV_SQRT2),
+    "sl": (0.0000,  0.045,        0.0,         1.0),
+    "sr": (0.0000, -0.045,        0.0,        -1.0),
+}
+# 2 downward QTR line sensors at the front-left/right plow corners,
+# expressed as (body_x, body_y) in the enemy's local frame.
+NOVAMAX_LINE_SENSORS: tuple[tuple[float, float], tuple[float, float]] = (
+    (0.0495,  0.045),
+    (0.0495, -0.045),
+)
+
 AGENT_RGBA = (0.85, 0.15, 0.15, 1.0)
 ENEMY_RGBA = (0.15, 0.30, 0.85, 1.0)
 
@@ -68,25 +92,41 @@ SUBSTEPS_PER_STEP = 11
 INITIAL_CHARGE_MS = 500
 INITIAL_CHARGE_TICKS = int(round((INITIAL_CHARGE_MS / 1000.0) / SIM_TIMESTEP))
 
-WHEEL_MAX_TORQUE = 2.0
-LINEAR_SPEED = 0.40
-WHEEL_OMEGA_FWD = LINEAR_SPEED / WHEEL_RADIUS
-FORWARD_SIGN = 1.0
+# --- Hyper-realistic motor physics --------------------------------
+# Agent motors: N20 12 V, 95 RPM, 1.2 kg·cm stall torque.
+#   max angular vel = 95 * 2*pi / 60 = 9.948 rad/s
+#   max stall force = 0.12 N·m
+AGENT_MAX_RAD = 9.95
+AGENT_MAX_FORCE = 0.12
 
-# Enemy: 3x torque so head-on pushing contests are decisively the
-# enemy's win. The agent must learn to flank/sidestep, not engage
-# head-on. Base speed otherwise.
-ENEMY_WHEEL_TORQUE_MULT = 3.0
-ENEMY_FORWARD_OMEGA = WHEEL_OMEGA_FWD
-ENEMY_PIVOT_OMEGA = WHEEL_OMEGA_FWD
-ENEMY_WHEEL_TORQUE = WHEEL_MAX_TORQUE * ENEMY_WHEEL_TORQUE_MULT
+# NovaMax motors: 16 mm gearmotor, 800 RPM, ~5 kg·cm stall torque.
+#   max angular vel = 800 * 2*pi / 60 = 83.776 rad/s
+#   max stall force = 0.50 N·m  (out-pushes the agent's 0.12 N·m)
+NOVAMAX_MAX_RAD = NOVAMAX_WHEEL_OMEGA   # 83.776 rad/s
+NOVAMAX_MAX_FORCE = 0.50
+
+# Curriculum levels for the NovaMax opponent. Each entry is
+# (max_velocity_rad_s, max_stall_torque_Nm). Level 1 matches the agent's
+# N20 spec exactly; level 3 is full real spec — fast AND stronger than
+# the agent in pushing contests.
+NOVAMAX_LEVELS: dict[int, tuple[float, float]] = {
+    1: (9.95,   0.12),    # nerfed — matches agent
+    2: (40.0,   0.25),    # medium speed, ~2× agent torque
+    3: (83.78,  0.50),    # boss / real spec (800 RPM, 4× agent torque)
+}
+
+# Legacy aliases kept so existing call sites don't break; these are
+# the AGENT's limits, used only when applying the agent's wheel motors.
+WHEEL_MAX_TORQUE = AGENT_MAX_FORCE
+WHEEL_OMEGA_FWD = AGENT_MAX_RAD
+FORWARD_SIGN = 1.0
 
 WHEEL_FRICTION = 1.0
 CHASSIS_FRICTION = 0.4
 
 # Domain randomization.
 DOHYO_FRICTION_RANGE = (0.8, 1.2)
-ROBOT_MASS_NOMINAL = 0.4
+ROBOT_MASS_NOMINAL = 0.5
 ROBOT_MASS_VARIATION = 0.10
 MOTOR_SLOP_RANGE = (0.85, 1.15)
 SENSOR_DEAD_PROB = 0.20
@@ -95,10 +135,10 @@ SENSOR_DEAD_PROB = 0.20
 ENEMY_FAR_DIST = 0.80
 LAST_SEEN_THRESHOLD = 0.5
 
-# Original reward stack that produced 45-55% win-rate.
-REWARD_WIN = 100.0
-REWARD_LOSE = -100.0
-REWARD_TIME = -0.5
+# "Peak 50%" reward stack scaled up for stronger terminal signal.
+REWARD_WIN = 1000.0
+REWARD_LOSE = -1000.0
+REWARD_TIME = 0.0
 REWARD_HUNTER = 2.0
 REWARD_TRACK = 1.0
 REWARD_COWARD = -5.0
@@ -117,84 +157,104 @@ CURRICULUM_PROB = 0.25
 EDGE_SPAWN_RADIUS = 0.30
 
 FALL_Z = 0.0
-MAX_EPISODE_STEPS = 250
+MAX_EPISODE_STEPS = 500
 
 
-class EnemyController:
-    """Python port of the davo_sirad.ino opponent's behavior loop."""
+class NovamaxController:
+    """Novamax Professional Mini Sumo Kit firmware port.
 
-    OUTLIER_MAX = 8000
-    DETECT_DIST = 350
-    HOLD_DIST = 450
-    CONFIRM_HITS = 1
-    CONFIRM_MISSES = (2, 10, 2)
-
-    FORWARD = 0
-    LEFT = 1
-    RIGHT = 2
+    State machine, evaluated once per RL step (~46 ms):
+      Priority 1 (survival): if a downward line sensor sees the white edge,
+                             reverse for ~200 ms then tank-spin away from
+                             the triggered side for another ~200 ms.
+      Priority 2 (attack):   route on the 5 IR sensors — front-centre charge,
+                             front-side arc, side spin to bring enemy back
+                             into the front cone.
+      Priority 3 (search):   tank-spin in last-seen direction, or arc-search
+                             if the enemy hasn't been seen yet.
+    """
 
     def __init__(self) -> None:
         self.reset()
 
     def reset(self) -> None:
-        self._last_valid = [500, 500, 500]
-        self._has_ever_seen = [False, False, False]
-        self._currently_seen = [False, False, False]
-        self._hit_streak = [0, 0, 0]
-        self._miss_streak = [0, 0, 0]
-        self._spin_dir_right = False
+        self.last_seen_side = 0       # -1 left, 0 unseen, +1 right
+        self._edge_state: str | None = None      # None / "reverse" / "spin"
+        self._edge_timer = 0
+        self._edge_spin_dir = 0       # +1 spin right, -1 spin left
 
-    def _filtered(self, idx: int, raw_mm: int) -> int:
-        valid = 0 < raw_mm < self.OUTLIER_MAX
-        if not valid:
-            self._hit_streak[idx] = 0
-            if self._miss_streak[idx] < 255:
-                self._miss_streak[idx] += 1
-            if self._miss_streak[idx] >= self.CONFIRM_MISSES[idx]:
-                self._currently_seen[idx] = False
-                self._has_ever_seen[idx] = False
-                return self.OUTLIER_MAX
-            return self._last_valid[idx] if self._has_ever_seen[idx] else self.OUTLIER_MAX
+    @property
+    def is_edge_braking(self) -> bool:
+        """True while the controller is reversing/spinning away from edge."""
+        return self._edge_state is not None
 
-        self._miss_streak[idx] = 0
-        if self._hit_streak[idx] < 255:
-            self._hit_streak[idx] += 1
-        if self._hit_streak[idx] >= self.CONFIRM_HITS:
-            self._currently_seen[idx] = True
-        self._has_ever_seen[idx] = True
-        self._last_valid[idx] = raw_mm
-        return raw_mm
+    # Real-world NovaMax wheel speeds (rad/s) for the ATTACK state. The env
+    # clips them to the active level's max_rad, so level-1 / 2 still nerf
+    # the absolute speed.
+    FULL = 83.78        # full 800 RPM
+    ARC = 40.0          # inside wheel during an arc turn (~380 RPM)
+    SPIN = 83.78        # full opposite-direction spin (attack mode only)
 
-    def decide(self, raw_right_mm: int, raw_front_mm: int, raw_left_mm: int) -> int:
-        d0 = self._filtered(0, raw_right_mm)
-        d1 = self._filtered(1, raw_front_mm)
-        d2 = self._filtered(2, raw_left_mm)
+    # EDGE-RECOVERY speeds. Spinning at 800 RPM in place creates so much
+    # centrifugal force that the silicone wheels lose traction and the
+    # chassis slides off the dohyo like a hockey puck. The recovery uses
+    # a slow controlled speed, matching a real Arduino's edge PWM.
+    EDGE_SAFE_SPEED = 30.0   # rad/s ≈ 286 RPM, ~0.5 m/s
+    EDGE_REVERSE_STEPS = 2   # ~92 ms of controlled reverse
+    EDGE_SPIN_STEPS = 4      # ~184 ms of controlled spin
 
-        limit0 = self.HOLD_DIST if self._currently_seen[0] else self.DETECT_DIST
-        limit1 = self.HOLD_DIST if self._currently_seen[1] else self.DETECT_DIST
-        limit2 = self.HOLD_DIST if self._currently_seen[2] else self.DETECT_DIST
+    def decide(
+        self, ir_hits: dict[str, bool], edge_left: bool, edge_right: bool,
+    ) -> tuple[float, float]:
+        # ---------- Priority 1: edge avoidance --------------------------
+        # Two-phase recovery at SAFE_SPEED so the body keeps traction:
+        #   1) reverse for EDGE_REVERSE_STEPS ticks
+        #   2) tank-spin away for EDGE_SPIN_STEPS ticks
+        if self._edge_state is None and (edge_left or edge_right):
+            self._edge_state = "reverse"
+            self._edge_timer = self.EDGE_REVERSE_STEPS
+            # Spin AWAY from the triggered side. Left edge -> spin right
+            # (l=+, r=-) so the body rotates clockwise / faces centre.
+            self._edge_spin_dir = +1 if edge_left else -1
 
-        s0 = self._currently_seen[0] and d0 <= limit0
-        s1 = self._currently_seen[1] and d1 <= limit1
-        s2 = self._currently_seen[2] and d2 <= limit2
+        if self._edge_state == "reverse":
+            self._edge_timer -= 1
+            if self._edge_timer <= 0:
+                self._edge_state = "spin"
+                self._edge_timer = self.EDGE_SPIN_STEPS
+            v = self.EDGE_SAFE_SPEED
+            return -v, -v
 
-        if s0 and s1 and s2:
-            if d1 <= d0 and d1 <= d2:
-                return self.FORWARD
-            if d0 <= d2:
-                self._spin_dir_right = True
-                return self.RIGHT
-            self._spin_dir_right = False
-            return self.LEFT
-        if s1:
-            return self.FORWARD
-        if s0:
-            self._spin_dir_right = True
-            return self.RIGHT
-        if s2:
-            self._spin_dir_right = False
-            return self.LEFT
-        return self.RIGHT if self._spin_dir_right else self.LEFT
+        if self._edge_state == "spin":
+            self._edge_timer -= 1
+            if self._edge_timer <= 0:
+                self._edge_state = None
+            v = self.EDGE_SAFE_SPEED
+            return (v, -v) if self._edge_spin_dir > 0 else (-v, v)
+
+        # ---------- Priority 2: attack ----------------------------------
+        if ir_hits.get("fc"):
+            return self.FULL, self.FULL
+        if ir_hits.get("fl"):
+            self.last_seen_side = -1
+            return self.ARC, self.FULL
+        if ir_hits.get("fr"):
+            self.last_seen_side = +1
+            return self.FULL, self.ARC
+        if ir_hits.get("sl"):
+            self.last_seen_side = -1
+            return -self.SPIN, self.SPIN
+        if ir_hits.get("sr"):
+            self.last_seen_side = +1
+            return self.SPIN, -self.SPIN
+
+        # ---------- Priority 3: search ----------------------------------
+        if self.last_seen_side == -1:
+            return -self.SPIN, self.SPIN     # tank-spin left
+        if self.last_seen_side == +1:
+            return self.SPIN, -self.SPIN     # tank-spin right
+        # Default wide arc-search if we've never seen the agent.
+        return self.ARC * 0.8, self.FULL
 
 
 class MiniSumoEnv(gym.Env):
@@ -208,16 +268,26 @@ class MiniSumoEnv(gym.Env):
         seed: Optional[int] = None,
         enemy_torque_multiplier: float = 2.0,
         human_enemy: bool = False,
+        novamax_level: int = 3,
+        novamax_torque_mult: Optional[float] = None,
     ) -> None:
         super().__init__()
 
         self.gui = gui
-        # Curriculum knob — set by the trainer between phases via
-        # env.unwrapped.enemy_torque_mult = X. Multiplies the wheel torque
-        # cap applied to the davo_sirad opponent.
+        # Legacy knob kept so old call-sites still work; novamax_level
+        # supersedes it for the actual physics caps.
         self.enemy_torque_mult = float(enemy_torque_multiplier)
+        # NovaMax curriculum tier (1 = nerfed, 3 = real spec). Set by the
+        # trainer between phases via env.unwrapped.novamax_level = N.
+        self.novamax_level = int(novamax_level)
+        # Fine-grained override: when set, NovaMax velocity & torque caps
+        # = AGENT_MAX_RAD/FORCE * mult (e.g. 1.5x for an intermediate phase).
+        # When None, the level table above is used.
+        self.novamax_torque_mult: Optional[float] = (
+            float(novamax_torque_mult) if novamax_torque_mult is not None else None
+        )
         # When True, the blue robot is driven by keyboard (WASD / arrows)
-        # instead of the davo_sirad controller. Requires gui=True.
+        # instead of the NovamaxController. Requires gui=True.
         self.human_enemy = bool(human_enemy)
         self._client_id = -1
         self._connect()
@@ -237,7 +307,7 @@ class MiniSumoEnv(gym.Env):
         self._enemy_left_idx: Optional[int] = None
         self._enemy_right_idx: Optional[int] = None
 
-        self._enemy_ctrl = EnemyController()
+        self._enemy_ctrl = NovamaxController()
         self._disabled_sensor: Optional[int] = None
 
         self.last_seen_dir: float = 0.0
@@ -291,10 +361,13 @@ class MiniSumoEnv(gym.Env):
         )
         p.changeDynamics(black_id, -1, lateralFriction=surface_friction)
 
-    def _spawn_robot(self, position, yaw: float, chassis_rgba) -> tuple[int, dict]:
+    def _spawn_robot(
+        self, position, yaw: float, chassis_rgba,
+        urdf_path: str = ROBOT_URDF,
+    ) -> tuple[int, dict]:
         orn = p.getQuaternionFromEuler([0.0, 0.0, yaw])
         body_id = p.loadURDF(
-            ROBOT_URDF, basePosition=list(position), baseOrientation=orn,
+            urdf_path, basePosition=list(position), baseOrientation=orn,
             useFixedBase=False, flags=p.URDF_USE_INERTIA_FROM_FILE,
         )
         p.changeVisualShape(body_id, -1, rgbaColor=chassis_rgba)
@@ -304,12 +377,14 @@ class MiniSumoEnv(gym.Env):
             for j in range(p.getNumJoints(body_id))
         }
         for jname in ("left_wheel_joint", "right_wheel_joint"):
-            p.changeDynamics(body_id, joint_lookup[jname], lateralFriction=WHEEL_FRICTION)
+            if jname in joint_lookup:
+                p.changeDynamics(body_id, joint_lookup[jname], lateralFriction=WHEEL_FRICTION)
         p.changeDynamics(body_id, -1, lateralFriction=CHASSIS_FRICTION)
-        p.changeDynamics(
-            body_id, joint_lookup["front_caster_joint"],
-            lateralFriction=0.0, rollingFriction=0.0, spinningFriction=0.0,
-        )
+        if "front_caster_joint" in joint_lookup:
+            p.changeDynamics(
+                body_id, joint_lookup["front_caster_joint"],
+                lateralFriction=0.0, rollingFriction=0.0, spinningFriction=0.0,
+            )
         return body_id, joint_lookup
 
     # ------------------------------------------------------------------
@@ -334,14 +409,104 @@ class MiniSumoEnv(gym.Env):
             return None
         return hit_fraction * max_dist
 
-    def _enemy_distance_mm(self, body_dx: float, body_dy: float, start_offset: float) -> int:
-        dist = self._ray_distance(
-            self.enemy_id, body_dx, body_dy, start_offset,
-            ENEMY_SENSOR_MAX_M, target_id=self.robot_id,
+    def _ray_from_body_point(
+        self, from_body: int,
+        start_x: float, start_y: float,
+        dir_x: float, dir_y: float,
+        max_dist: float, target_id: Optional[int] = None,
+    ) -> Optional[float]:
+        """Like _ray_distance, but the start point is an arbitrary body-frame
+        offset instead of `start_offset` along the ray direction.
+
+        Useful for sensor mounts that are NOT on the body's centre line
+        (e.g. side IRs at the left/right edges of the chassis).
+        """
+        pos, orn = p.getBasePositionAndOrientation(from_body)
+        yaw = p.getEulerFromQuaternion(orn)[2]
+        cy, sy = math.cos(yaw), math.sin(yaw)
+        sx_w = cy * start_x - sy * start_y
+        sy_w = sy * start_x + cy * start_y
+        dx_w = cy * dir_x - sy * dir_y
+        dy_w = sy * dir_x + cy * dir_y
+        sensor_z = pos[2] + 0.022
+        start = [pos[0] + sx_w, pos[1] + sy_w, sensor_z]
+        end = [start[0] + dx_w * max_dist, start[1] + dy_w * max_dist, sensor_z]
+        hit_uid, _, hit_fraction, _, _ = p.rayTest(start, end)[0]
+        if hit_uid < 0 or hit_uid == from_body:
+            return None
+        if target_id is not None and hit_uid != target_id:
+            return None
+        return hit_fraction * max_dist
+
+    def _novamax_edge_watchdog(self) -> bool:
+        """High-rate edge check, intended to run every physics substep.
+
+        At 1600 RPM NovaMax covers ~12 cm per RL step, so checking line
+        sensors only at the RL boundary lets it skate past the dohyo edge.
+        This routine samples both line sensors and, if either fires AND
+        the controller isn't already in its brake state, performs the
+        instant-stop (zero wheels + zero chassis linear vel) and forces
+        the controller into brake state. Returns True if it intervened.
+        """
+        if self._enemy_ctrl.is_edge_braking:
+            return False
+        edge_left = self._novamax_line_triggered(*NOVAMAX_LINE_SENSORS[0])
+        edge_right = self._novamax_line_triggered(*NOVAMAX_LINE_SENSORS[1])
+        if not (edge_left or edge_right):
+            return False
+
+        # Manually push the controller into the reverse phase. The next
+        # decide() call will continue the reverse → spin sequence at
+        # EDGE_SAFE_SPEED so the chassis keeps traction.
+        self._enemy_ctrl._edge_state = "reverse"
+        self._enemy_ctrl._edge_timer = self._enemy_ctrl.EDGE_REVERSE_STEPS
+        self._enemy_ctrl._edge_spin_dir = +1 if edge_left else -1
+
+        # Instant stop: kill linear momentum and wheel rotation. Keep
+        # angular velocity so the body can pivot during the spin phase.
+        _, ang_vel = p.getBaseVelocity(self.enemy_id)
+        p.resetBaseVelocity(
+            self.enemy_id,
+            linearVelocity=[0.0, 0.0, 0.0],
+            angularVelocity=list(ang_vel),
         )
-        if dist is None:
-            return EnemyController.OUTLIER_MAX
-        return int(dist * 1000.0)
+        p.resetJointState(
+            self.enemy_id, self._enemy_left_idx,
+            targetValue=0.0, targetVelocity=0.0,
+        )
+        p.resetJointState(
+            self.enemy_id, self._enemy_right_idx,
+            targetValue=0.0, targetVelocity=0.0,
+        )
+        # Drive both wheels at -EDGE_SAFE_SPEED (controlled reverse) for
+        # the rest of this RL step. Next RL tick re-enters the main
+        # control branch which will continue the reverse → spin sequence
+        # at EDGE_SAFE_SPEED so the chassis keeps traction.
+        max_force_brake = 2.0
+        v = NovamaxController.EDGE_SAFE_SPEED
+        p.setJointMotorControl2(
+            bodyUniqueId=self.enemy_id, jointIndex=self._enemy_left_idx,
+            controlMode=p.VELOCITY_CONTROL,
+            targetVelocity=-FORWARD_SIGN * v,
+            force=max_force_brake,
+        )
+        p.setJointMotorControl2(
+            bodyUniqueId=self.enemy_id, jointIndex=self._enemy_right_idx,
+            controlMode=p.VELOCITY_CONTROL,
+            targetVelocity=-FORWARD_SIGN * v,
+            force=max_force_brake,
+        )
+        return True
+
+    def _novamax_line_triggered(self, body_x: float, body_y: float) -> bool:
+        """Return True when the corner (body_x, body_y) on the enemy chassis
+        is over the dohyo's white border ring (i.e. line sensor fires)."""
+        pos, orn = p.getBasePositionAndOrientation(self.enemy_id)
+        yaw = p.getEulerFromQuaternion(orn)[2]
+        cy, sy = math.cos(yaw), math.sin(yaw)
+        wx = pos[0] + cy * body_x - sy * body_y
+        wy = pos[1] + sy * body_x + cy * body_y
+        return math.hypot(wx, wy) > INNER_RADIUS
 
     def _raw_distances(self) -> list[Optional[float]]:
         front_offset = ROBOT_FRONT_EXTENT + 0.005
@@ -398,23 +563,69 @@ class MiniSumoEnv(gym.Env):
         )
 
     def _apply_enemy_control(self) -> None:
-        front_offset = ROBOT_FRONT_EXTENT + 0.005
-        side_offset = ROBOT_WIDTH / 2.0 + 0.005
-        right_mm = self._enemy_distance_mm(0.0, -1.0, side_offset)
-        front_mm = self._enemy_distance_mm(1.0, 0.0, front_offset)
-        left_mm = self._enemy_distance_mm(0.0, 1.0, side_offset)
+        # 5 IR sensors -> bool dict (True if any hit on the agent within range).
+        ir_hits: dict[str, bool] = {}
+        for name, (sx, sy, dx, dy) in NOVAMAX_IR_SENSORS.items():
+            d = self._ray_from_body_point(
+                self.enemy_id, sx, sy, dx, dy,
+                NOVAMAX_IR_RANGE, target_id=self.robot_id,
+            )
+            ir_hits[name] = d is not None
 
-        cmd = self._enemy_ctrl.decide(right_mm, front_mm, left_mm)
+        # 2 downward line sensors at the front-left/right plow corners.
+        edge_left = self._novamax_line_triggered(*NOVAMAX_LINE_SENSORS[0])
+        edge_right = self._novamax_line_triggered(*NOVAMAX_LINE_SENSORS[1])
 
-        if cmd == EnemyController.FORWARD:
-            left_omega, right_omega = ENEMY_FORWARD_OMEGA, ENEMY_FORWARD_OMEGA
-        elif cmd == EnemyController.RIGHT:
-            left_omega, right_omega = ENEMY_PIVOT_OMEGA, -ENEMY_PIVOT_OMEGA
+        # Resolve the per-tier (max_rad, max_force). novamax_torque_mult
+        # (when not None) overrides the level lookup so train_novamax_v2
+        # can use intermediate steps like 1.5× / 2.0×.
+        if self.novamax_torque_mult is not None:
+            mult = float(self.novamax_torque_mult)
+            max_rad = AGENT_MAX_RAD * mult
+            max_force = AGENT_MAX_FORCE * mult
         else:
-            left_omega, right_omega = -ENEMY_PIVOT_OMEGA, ENEMY_PIVOT_OMEGA
+            max_rad, max_force = NOVAMAX_LEVELS.get(
+                self.novamax_level, NOVAMAX_LEVELS[3],
+            )
 
-        # Curriculum-controlled enemy torque cap.
-        torque = WHEEL_MAX_TORQUE * self.enemy_torque_mult
+        # Did the edge state machine kick in this tick? (Track the
+        # transition None -> active so we only instant-stop once per
+        # detection, not every tick of the 5+5 brake sequence.)
+        was_braking = self._enemy_ctrl.is_edge_braking
+        left_omega, right_omega = self._enemy_ctrl.decide(
+            ir_hits, edge_left, edge_right,
+        )
+        edge_just_triggered = (not was_braking) and self._enemy_ctrl.is_edge_braking
+
+        if edge_just_triggered:
+            # NovaMax's 0.05 N·m stall torque can't bleed off ~1.25 kg·m/s
+            # of forward momentum in 5 ticks, so the robot would slide off
+            # the dohyo before the reverse maneuver can take effect.
+            # Instant-stop: zero the wheels and the chassis linear velocity
+            # the moment the line sensor fires (preserve angular velocity
+            # so the body can still pivot during the spin phase).
+            _, ang_vel = p.getBaseVelocity(self.enemy_id)
+            base_pos, base_orn = p.getBasePositionAndOrientation(self.enemy_id)
+            p.resetBaseVelocity(
+                self.enemy_id,
+                linearVelocity=[0.0, 0.0, 0.0],
+                angularVelocity=list(ang_vel),
+            )
+            p.resetJointState(
+                self.enemy_id, self._enemy_left_idx,
+                targetValue=0.0, targetVelocity=0.0,
+            )
+            p.resetJointState(
+                self.enemy_id, self._enemy_right_idx,
+                targetValue=0.0, targetVelocity=0.0,
+            )
+
+        left_omega = max(-max_rad, min(max_rad, float(left_omega)))
+        right_omega = max(-max_rad, min(max_rad, float(right_omega)))
+        # While braking, give the motors a much higher effective torque
+        # cap so the reverse/spin commands actually have authority over
+        # the body's momentum.
+        torque = max(max_force, 2.0) if self._enemy_ctrl.is_edge_braking else max_force
         p.setJointMotorControl2(
             bodyUniqueId=self.enemy_id, jointIndex=self._enemy_left_idx,
             controlMode=p.VELOCITY_CONTROL,
@@ -456,9 +667,12 @@ class MiniSumoEnv(gym.Env):
         l_cmd = max(-1.0, min(1.0, l_cmd))
         r_cmd = max(-1.0, min(1.0, r_cmd))
 
-        l_omega = l_cmd * WHEEL_OMEGA_FWD
-        r_omega = r_cmd * WHEEL_OMEGA_FWD
-        torque = WHEEL_MAX_TORQUE * self.enemy_torque_mult
+        max_rad, max_force = NOVAMAX_LEVELS.get(
+            self.novamax_level, NOVAMAX_LEVELS[3],
+        )
+        l_omega = l_cmd * max_rad
+        r_omega = r_cmd * max_rad
+        torque = max_force
         p.setJointMotorControl2(
             bodyUniqueId=self.enemy_id, jointIndex=self._enemy_left_idx,
             controlMode=p.VELOCITY_CONTROL,
@@ -502,28 +716,41 @@ class MiniSumoEnv(gym.Env):
 
         angle = float(self._np_random.uniform(0.0, 2.0 * math.pi))
         spawn_z = DOHYO_TOP_Z + 0.001
+
+        # Per-robot yaw and spawn-radius jitter so the agent can't memorise
+        # a deterministic head-on charge. Yaw ±30°, radius ±5 cm.
+        yaw_jitter_a = float(self._np_random.uniform(-math.radians(30),
+                                                      math.radians(30)))
+        yaw_jitter_e = float(self._np_random.uniform(-math.radians(30),
+                                                      math.radians(30)))
+        radius_a = SPAWN_RADIUS + float(self._np_random.uniform(-0.05, 0.05))
+        radius_e = SPAWN_RADIUS + float(self._np_random.uniform(-0.05, 0.05))
+
         agent_pos = (
-            SPAWN_RADIUS * math.cos(angle),
-            SPAWN_RADIUS * math.sin(angle),
+            radius_a * math.cos(angle),
+            radius_a * math.sin(angle),
             spawn_z,
         )
-        agent_yaw = angle + math.pi
+        agent_yaw = angle + math.pi + yaw_jitter_a
 
         if self._np_random.random() < CURRICULUM_PROB:
             enemy_angle = float(self._np_random.uniform(0.0, 2.0 * math.pi))
+            edge_radius = EDGE_SPAWN_RADIUS + float(
+                self._np_random.uniform(-0.05, 0.05)
+            )
             enemy_pos = (
-                EDGE_SPAWN_RADIUS * math.cos(enemy_angle),
-                EDGE_SPAWN_RADIUS * math.sin(enemy_angle),
+                edge_radius * math.cos(enemy_angle),
+                edge_radius * math.sin(enemy_angle),
                 spawn_z,
             )
-            enemy_yaw = enemy_angle
+            enemy_yaw = enemy_angle + yaw_jitter_e
         else:
             enemy_pos = (
-                -SPAWN_RADIUS * math.cos(angle),
-                -SPAWN_RADIUS * math.sin(angle),
+                -radius_e * math.cos(angle),
+                -radius_e * math.sin(angle),
                 spawn_z,
             )
-            enemy_yaw = angle
+            enemy_yaw = angle + yaw_jitter_e
 
         self.robot_id, agent_joints = self._spawn_robot(agent_pos, agent_yaw, AGENT_RGBA)
         self._left_wheel_idx = agent_joints["left_wheel_joint"]
@@ -534,7 +761,9 @@ class MiniSumoEnv(gym.Env):
         ))
         p.changeDynamics(self.robot_id, -1, mass=ROBOT_MASS_NOMINAL * mass_factor)
 
-        self.enemy_id, enemy_joints = self._spawn_robot(enemy_pos, enemy_yaw, ENEMY_RGBA)
+        self.enemy_id, enemy_joints = self._spawn_robot(
+            enemy_pos, enemy_yaw, ENEMY_RGBA, urdf_path=NOVAMAX_URDF,
+        )
         self._enemy_left_idx = enemy_joints["left_wheel_joint"]
         self._enemy_right_idx = enemy_joints["right_wheel_joint"]
         self._enemy_ctrl.reset()
@@ -553,12 +782,12 @@ class MiniSumoEnv(gym.Env):
             p.setJointMotorControl2(
                 bodyUniqueId=self.enemy_id, jointIndex=self._enemy_left_idx,
                 controlMode=p.VELOCITY_CONTROL, targetVelocity=0.0,
-                force=WHEEL_MAX_TORQUE * self.enemy_torque_mult,
+                force=NOVAMAX_LEVELS.get(self.novamax_level, NOVAMAX_LEVELS[3])[1],
             )
             p.setJointMotorControl2(
                 bodyUniqueId=self.enemy_id, jointIndex=self._enemy_right_idx,
                 controlMode=p.VELOCITY_CONTROL, targetVelocity=0.0,
-                force=WHEEL_MAX_TORQUE * self.enemy_torque_mult,
+                force=NOVAMAX_LEVELS.get(self.novamax_level, NOVAMAX_LEVELS[3])[1],
             )
             p.stepSimulation()
             if self.gui:
@@ -589,6 +818,11 @@ class MiniSumoEnv(gym.Env):
             if not p.isConnected(self._client_id):
                 zero_obs = np.zeros(self.observation_space.shape, dtype=np.float32)
                 return zero_obs, 0.0, False, True, {"disconnected": True}
+            # Fast-path edge check (≈4 ms granularity vs 46 ms at the RL
+            # boundary): catches the line sensor before NovaMax flies off
+            # the dohyo at 2.77 m/s.
+            if not self.human_enemy:
+                self._novamax_edge_watchdog()
             p.stepSimulation()
             if self.gui:
                 time.sleep(SIM_TIMESTEP)

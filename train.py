@@ -99,11 +99,19 @@ class WinRateCallback(BaseCallback):
             # A 51% win-rate at 2.5× (score 1.275) is genuinely stronger
             # than a 55% win-rate at 2.0× (score 1.10), even though the
             # raw rate is lower.
+            # Prefer novamax_level (per-tier difficulty) — fall back to
+            # the legacy enemy_torque_mult for the davo_sirad runs.
             try:
-                torque = float(self.model.get_env().get_attr("enemy_torque_mult")[0])
+                level = int(self.model.get_env().get_attr("novamax_level")[0])
+                difficulty = float(level)
             except Exception:
-                torque = 1.0
-            score = recent * torque
+                try:
+                    difficulty = float(
+                        self.model.get_env().get_attr("enemy_torque_mult")[0]
+                    )
+                except Exception:
+                    difficulty = 1.0
+            score = recent * difficulty
 
             new_best = False
             if (self.best_path is not None
@@ -119,7 +127,7 @@ class WinRateCallback(BaseCallback):
                 f"episodes={self.total_episodes:4d}  "
                 f"rolling_wr({len(self.recent_outcomes)})={recent:.2%}  "
                 f"total_wr={total:.2%}  "
-                f"score(wr*torque{torque:.1f})={score:.3f}{tag}",
+                f"score(wr*diff{difficulty:.1f})={score:.3f}{tag}",
                 flush=True,
             )
             self._next_report += self.report_every
