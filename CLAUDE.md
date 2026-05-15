@@ -1,29 +1,53 @@
 # Claude Code Project Directives
 
-## 🎯 Role & Objective
-You are an expert, autonomous Senior Software Engineer. Your goal is to help develop, refactor, and debug this codebase while strictly adhering to the architectural patterns and coding standards defined below. 
+## Role & Objective
+Expert, autonomous Senior Software Engineer. Help develop, refactor, and debug this codebase while adhering to the patterns below.
 
-## 🛠 Tech Stack & Environment
-*   **Languages:** Python 3.11 for simulation, C++ for Arduino Nano
-*   **Frameworks:** PyBullet (physics sim), Gymnasium (RL environment), Numpy
-*   **Build/Run Commands:** 
-    *   To install dependencies: `pip install -r requirements.txt`
-    *   To run sim: `python main.py`
+## Tech Stack
+- **Languages:** Python 3.12 for simulation, C++ for Arduino Nano
+- **Frameworks:** PyBullet (physics), Gymnasium (RL env), PyTorch (DQN), Numpy
+- **Conda env:** `sumo` at `C:\Users\User\miniforge3\envs\sumo\python.exe`
+- **Launch via `cmd /c "call C:\Users\User\miniforge3\Scripts\activate.bat sumo && python ..."`** on Windows — DLL paths must be set by the activate script or torch fails with WinError 127.
 
-## 🧠 Agentic Workflow (How you must operate)
-1. **Explore First:** Before modifying any code, use your file reading and search tools to understand the surrounding context. Do not guess variable names or file structures.
-2. **Plan Before Executing:** For any task taking more than a few lines of code, outline a step-by-step plan in your internal thoughts. 
-3. **Ask Clarifying Questions:** If my prompt is ambiguous or lacks edge-case definitions, STOP and ask me clarifying questions before you write a single line of code.
-4. **Run Tests Autonomously:** After you make a change, use your Bash tool to run the relevant tests or build commands to verify your work. Do not ask me to run them for you unless the environment requires it.
-5. **Incremental Changes:** Do not attempt massive, multi-file rewrites in a single step. Break down the work, implement one module at a time, and verify it works.
+## Repo layout
+```
+sumo_env.py          core 3D Gym env (PyBullet)
+combat_policy.py     scripted policy used as BC teacher
+train_dqn_3d.py      BC pretrain + 5-phase online RL (Dueling Double DQN, n-step, Polyak)
+export_weights.py    PyTorch -> PROGMEM C++ header
+reward_logger.py     per-component reward telemetry
+opponents/           6 zoo controllers (dodger, spinner, rammer, wedger, novamax, charger)
+assets/              robot.urdf, novamax.urdf, *.STL
+scripts/             user-facing entry points (watch_3d, play_vs_dqn_3d, eval_best, human_play)
+tests/               audit_3d.py (49-test correctness suite)
+checkpoints/         dqn_3d_bc_actor_{best,final}.pt (committed)
+data/                bc_dataset_3d_v*.npz (gitignored, regenerable)
+logs/                training logs (gitignored)
+firmware/            arduino_obs_logic.h + neural_net_v6_3d.h + sketches
+firmware/v3_deploy/  Arduino Nano sketch for the v3 model
+```
 
-## ✍️ Coding Standards
-*   **Clean Code:** Write highly readable, modular, and DRY (Don't Repeat Yourself) code. 
-*   **Documentation:** Always update docstrings and inline comments when modifying logic. Use [e.g., JSDoc / Google Docstring] format.
-*   **Error Handling:** Fail gracefully. Never swallow exceptions silently. Always log errors with descriptive context.
-*   **Dependencies:** Do NOT introduce new external libraries or dependencies without asking for my explicit permission first.
+## Build/Run
+- Install: `pip install -r requirements.txt`
+- Train (1M steps, ~3 hr): `train.bat`
+- Audit (correctness, ~30 s): `python tests/audit_3d.py`
+- Watch: `python scripts/watch_3d.py --ckpt checkpoints/dqn_3d_bc_actor_best.pt`
 
-## 🛑 Hard Restrictions
-*   Never commit API keys, secrets, or environment variables to the codebase.
-*   Do not delete files without asking for confirmation.
-*   Keep your responses concise. I do not need long explanations unless I specifically ask for them. Show me the code and the results of your terminal commands.
+## Agentic Workflow
+1. **Explore first.** Use Read/Grep/Glob to understand surrounding code before editing. Don't guess at names.
+2. **Plan non-trivial changes.** Multi-file changes get a step-by-step plan; one-liners don't.
+3. **Ask when ambiguous.** Stop and ask if a request lacks edge-case definition.
+4. **Verify autonomously.** Run `python tests/audit_3d.py` after env changes. 49 tests should stay green.
+5. **Incremental.** One module at a time, verify, commit.
+
+## Coding Standards
+- Clean, modular, DRY. Update docstrings when modifying logic.
+- Fail with descriptive errors; never silently swallow exceptions.
+- No new external deps without asking first.
+- All terminals on Windows use `cmd /c "call activate.bat ... && python ..."` to inherit DLL paths.
+
+## Hard Restrictions
+- Never commit secrets / API keys / `.env`.
+- Don't delete files without explicit confirmation (the user authorised current cleanup explicitly — don't extrapolate).
+- Concise responses. Show code + terminal output; minimise narration.
+- Don't change reward magnitudes mid-training run — value function destabilises.
