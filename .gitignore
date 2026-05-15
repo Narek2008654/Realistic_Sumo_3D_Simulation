@@ -18,12 +18,21 @@ env/
 .claude/
 CLAUDE.md.local
 
-# Training artifacts (regeneratable — keep neural_net.h + final sac_actor.zip)
-checkpoints/
-sac_actor_best_phase*.zip
-sac_actor_weights.npz
-*.tmp
-timings_*.json
+# Training artifacts
+# Intermediate periodic snapshots — regeneratable from training.
+checkpoints/dqn_intermediate/
+checkpoints_dqn/
+checkpoints_novamax*/
+checkpoints_v3/
+runs_v4/
+# BC datasets are large + regenerable in Phase 0a (~5 min each).
+data/*.npz
+# Training logs.
+logs/
+*.log
+# Old stable-baselines3 zips.
+*.zip
 
 # Misc
-*.log
+*.tmp
+timings_*.json

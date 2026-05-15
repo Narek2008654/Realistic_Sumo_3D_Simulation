@@ -1,0 +1,247 @@
+<?xml version="1.0"?>
+<!--
+  Mini Sumo agent — 400 RPM CAD upgrade with rear line sensors.
+
+  Frame convention:
+    base_link origin sits at the centre of the 95.81 × 98 mm footprint,
+    on the floor plane. +X is forward, +Y is left, +Z is up.
+
+  Outer dimensions:
+    Total length (X) : 95.81 mm  ( front +0.0479, rear -0.0479 )
+    Total width  (Y) : 98 mm     ( ±0.049 )
+    Total height (Z) : 60 mm
+    Chassis box      : 66.9 × 98 × 50 mm  ( -0.0479 ≤ x ≤ +0.019,
+                                            z ∈ [0.010, 0.060] )
+                       Bottom lifted from z=0 to z=0.010 so the wheels
+                       (axle z=0.010, r=0.010, bottom z=0) are the sole
+                       ground contact. Chassis has 10 mm of clearance
+                       over the wheel-bottom plane.
+    Wedge            : 28.82 mm long, slope 0.4 mm tip → 16.6 mm trailing
+
+  Mass / CoM:
+    Total                    : 0.45 kg
+    CoM (relative to origin) : x = -0.0001 m  (48 mm behind front tip)
+                                y = 0
+                                z = 0.007 m   (7 mm above floor)
+
+  Wheels:
+    Diameter 20 mm (r=0.010), width 19 mm. Track width 79.5 mm
+    (axles at y = ±0.03975). Axle z = 0.010, wheel bottom z = 0;
+    chassis box bottom sits 10 mm above the wheel-bottom plane so
+    the wheels are the only ground contact. Mounted near the rear
+    at x = -0.035.
+
+  Line sensors: two QTR mounts at the rear of the chassis bottom face
+    (x = -0.02384, y = ±0.0404). These are sampled in sumo_env.py;
+    the URDF doesn't model them physically.
+-->
+<robot name="mini_sumo">
+
+  <!-- ======================== CHASSIS ======================== -->
+  <link name="base_link">
+    <inertial>
+      <!-- CoM 48 mm behind the front tip (= +0.0479 - 0.048 = -0.0001)
+           and 7 mm above the floor; mass 0.45 kg. -->
+      <origin xyz="-0.0001 0.0 0.007" rpy="0 0 0"/>
+      <mass value="0.45"/>
+      <!-- Box principal moments at 0.45 kg, dims 0.0669 × 0.098 × 0.050:
+           Ixx = (m/12)*(W^2 + H^2) = 4.54e-4
+           Iyy = (m/12)*(L^2 + H^2) = 2.62e-4
+           Izz = (m/12)*(L^2 + W^2) = 5.28e-4 -->
+      <inertia ixx="4.54e-4" ixy="0" ixz="0"
+               iyy="2.62e-4" iyz="0"
+               izz="5.28e-4"/>
+    </inertial>
+
+    <visual>
+      <!-- Chassis box centred between the rear face (-0.0479) and the
+           wedge boundary (+0.019) -> centre x = -0.01445. Bottom at
+           z = 0.010 (10 mm above the wheel-bottom plane) so the wheels
+           are the sole ground contact; top stays at z = 0.060. -->
+      <origin xyz="-0.01445 0.0 0.035" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.0669 0.098 0.050"/>
+      </geometry>
+      <material name="red">
+        <color rgba="0.85 0.15 0.15 1.0"/>
+      </material>
+    </visual>
+
+    <collision>
+      <origin xyz="-0.01445 0.0 0.035" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.0669 0.098 0.050"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <!-- ============== FRONT CASTER (invisible slider) ========== -->
+  <link name="front_caster">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="0.001"/>
+      <inertia ixx="1e-9" ixy="0" ixz="0"
+               iyy="1e-9" iyz="0"
+               izz="1e-9"/>
+    </inertial>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <sphere radius="0.003"/>
+      </geometry>
+    </collision>
+    <contact>
+      <lateral_friction value="0.0"/>
+      <rolling_friction value="0.0"/>
+      <spinning_friction value="0.0"/>
+    </contact>
+  </link>
+
+  <joint name="front_caster_joint" type="fixed">
+    <parent link="base_link"/>
+    <child  link="front_caster"/>
+    <!-- Just behind the wedge mount, under the chassis bottom edge so
+         the chassis nose can't snag if it tips forward. -->
+    <origin xyz="0.015 0.0 0.003" rpy="0 0 0"/>
+  </joint>
+
+  <!-- ====================== NOSE WEDGE ======================= -->
+  <!-- Slab geometry (in body frame):
+         trailing edge (top, joins chassis) : x = +0.019,   z ≈ 0.0166
+         leading edge (sharp tip)           : x = +0.0479,  z ≈ 0.0004
+         slope length  = sqrt(28.82^2 + 16.2^2) = 33.13 mm
+         pitch (about Y) = atan2(16.2, 28.82) = 0.5113 rad (~29.3 deg) -->
+  <link name="nose_wedge">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="0.02"/>
+      <!-- Slab inertia for box (0.03313 × 0.098 × 0.002), m=0.02.
+           Iyy bumped from computed 1.8e-6 to 2.5e-6 to give margin
+           under PyBullet's strict triangle inequality. -->
+      <inertia ixx="1.612e-5" ixy="0" ixz="0"
+               iyy="2.5e-6"   iyz="0"
+               izz="1.834e-5"/>
+    </inertial>
+
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <!-- slope-length × chassis-width × thin -->
+        <box size="0.03313 0.098 0.002"/>
+      </geometry>
+      <material name="silver">
+        <color rgba="0.75 0.75 0.78 1.0"/>
+      </material>
+    </visual>
+
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.03313 0.098 0.002"/>
+      </geometry>
+    </collision>
+
+    <contact>
+      <!-- Run-7 fix: bumped 0.3 -> 0.7. The previous "slick face" rationale
+           ("slide under, don't grab") was wrong: low friction means the
+           agent's wedge slides up over the opponent without transmitting
+           horizontal push, so its momentum carries it off the dohyo
+           (test_full_charge.py at torque_mult=0.7 produced 72% self-outs).
+           0.7 matches typical machined-aluminum-on-aluminum coefficient
+           and is symmetric with novamax.urdf for fair contests. -->
+      <lateral_friction value="0.7"/>
+    </contact>
+  </link>
+
+  <joint name="nose_wedge_joint" type="fixed">
+    <parent link="base_link"/>
+    <child  link="nose_wedge"/>
+    <!-- Slab centre at the midpoint of trailing and leading edges, rotated
+         so its long axis runs down-slope. Origin z = 0.0094 places the
+         leading-edge bottom corner at z ≈ 0.0004 (the spec'd lowest Z). -->
+    <origin xyz="0.03345 0.0 0.0094" rpy="0 0.5113 0"/>
+  </joint>
+
+  <!-- ===================== LEFT WHEEL ======================== -->
+  <link name="left_wheel">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="0.025"/>
+      <!-- Cylinder, r=0.010, h=0.019, axis along link +Y after the
+           90 deg roll:
+             Iyy (rolling)        = 0.5*m*r^2                = 1.25e-6
+             Ixx = Izz            = (m/12)*(3*r^2 + h^2)     = 1.378e-6 -->
+      <inertia ixx="1.378e-6" ixy="0" ixz="0"
+               iyy="1.25e-6"  iyz="0"
+               izz="1.378e-6"/>
+    </inertial>
+
+    <visual>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry>
+        <cylinder radius="0.010" length="0.019"/>
+      </geometry>
+      <material name="black">
+        <color rgba="0.05 0.05 0.05 1.0"/>
+      </material>
+    </visual>
+
+    <collision>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry>
+        <cylinder radius="0.010" length="0.019"/>
+      </geometry>
+    </collision>
+
+    <contact>
+      <lateral_friction value="1.0"/>
+    </contact>
+  </link>
+
+  <joint name="left_wheel_joint" type="continuous">
+    <parent link="base_link"/>
+    <child  link="left_wheel"/>
+    <!-- Axle 35 mm behind centre, +39.75 mm to the left, 10 mm above
+         floor so the chassis rides very low. -->
+    <origin xyz="-0.035 0.03975 0.010" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+  </joint>
+
+  <!-- ===================== RIGHT WHEEL ======================= -->
+  <link name="right_wheel">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="0.025"/>
+      <inertia ixx="1.378e-6" ixy="0" ixz="0"
+               iyy="1.25e-6"  iyz="0"
+               izz="1.378e-6"/>
+    </inertial>
+
+    <visual>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry>
+        <cylinder radius="0.010" length="0.019"/>
+      </geometry>
+      <material name="black"/>
+    </visual>
+
+    <collision>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry>
+        <cylinder radius="0.010" length="0.019"/>
+      </geometry>
+    </collision>
+
+    <contact>
+      <lateral_friction value="1.0"/>
+    </contact>
+  </link>
+
+  <joint name="right_wheel_joint" type="continuous">
+    <parent link="base_link"/>
+    <child  link="right_wheel"/>
+    <origin xyz="-0.035 -0.03975 0.010" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+  </joint>
+
+</robot>

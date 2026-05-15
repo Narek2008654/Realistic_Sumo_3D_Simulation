@@ -48,10 +48,10 @@ ROBOT_WIDTH = 0.098
 ROBOT_FRONT_EXTENT = 0.0496
 WHEEL_RADIUS = 0.010
 WHEEL_TRACK_HALF = 0.0401
-ROBOT_URDF = os.path.join(os.path.dirname(__file__), "robot.urdf")
+ROBOT_URDF = os.path.join(os.path.dirname(__file__), "assets", "robot.urdf")
 
 # Novamax Professional Mini Sumo Kit (opponent).
-NOVAMAX_URDF = os.path.join(os.path.dirname(__file__), "novamax.urdf")
+NOVAMAX_URDF = os.path.join(os.path.dirname(__file__), "assets", "novamax.urdf")
 # 800 RPM gearmotors, 16.5 mm wheel radius -> ~1.38 m/s top speed.
 # At 0.45 kg total mass, that's ~0.62 kg·m/s of momentum -- ~9× the agent's.
 NOVAMAX_RPM = 800.0
@@ -75,6 +75,14 @@ NOVAMAX_LINE_SENSORS: tuple[tuple[float, float], tuple[float, float]] = (
     (0.0495, -0.045),
 )
 
+# Agent line sensors: two downward QTRs at the rear of the chassis
+# bottom face, as (body_x, body_y) in the agent's local frame. They
+# return 1.0 when over the white border ring of the dohyo.
+AGENT_LINE_SENSORS: tuple[tuple[float, float], tuple[float, float]] = (
+    (-0.02384,  0.0404),   # rear-left
+    (-0.02384, -0.0404),   # rear-right
+)
+
 AGENT_RGBA = (0.85, 0.15, 0.15, 1.0)
 ENEMY_RGBA = (0.15, 0.30, 0.85, 1.0)
 
@@ -83,21 +91,37 @@ SPAWN_RADIUS = 0.25
 
 SIM_TIMESTEP = 1.0 / 240.0
 # 1 RL step = SUBSTEPS_PER_STEP physics ticks at 240 Hz.
-# 11 ticks ≈ 45.8 ms — fast enough to react to davo_sirad's pivots.
-SUBSTEPS_PER_STEP = 11
+# 10 ticks ≈ 41.67 ms ≈ 24 Hz, targeting a 25 Hz Arduino loop. Physics
+# tick stays at 240 Hz so the per-substep edge watchdog still runs at
+# ~4.2 ms granularity.
+SUBSTEPS_PER_STEP = 10
+STEP_DT_SECONDS = SUBSTEPS_PER_STEP * SIM_TIMESTEP   # 0.04167 s
+TARGET_ACTION_HZ = 25.0
+# Tolerance is ~2 ms because 240 Hz / 25 Hz = 9.6 substeps is not an
+# integer; 10 substeps lands at 24 Hz, which is within 4% of target.
+assert abs(STEP_DT_SECONDS - 1.0 / TARGET_ACTION_HZ) < 2.0e-3, (
+    f"env.step() is {STEP_DT_SECONDS * 1000:.2f} ms; "
+    f"target {1000.0 / TARGET_ACTION_HZ:.2f} ms ({TARGET_ACTION_HZ} Hz)"
+)
 
 # Initial agent-only forward charge at episode start (500 ms). The red
 # robot drives both wheels full forward; the enemy stays still until
 # the policy takes over.
-INITIAL_CHARGE_MS = 500
+# Initial-charge handicap-removal phase. Was 500 ms (the agent drove
+# full forward while the enemy was commanded stationary) but with a
+# 25 cm spawn radius the agent crossed the dohyo and rammed the
+# stationary enemy before tick 0 of training, scattering both bots
+# in random directions. Disabled in Run 7 — both controllers run from
+# tick 0, both bots start stationary at SPAWN_RADIUS facing centre.
+INITIAL_CHARGE_MS = 0
 INITIAL_CHARGE_TICKS = int(round((INITIAL_CHARGE_MS / 1000.0) / SIM_TIMESTEP))
 
 # --- Hyper-realistic motor physics --------------------------------
-# Agent motors: N20 12 V, 400 RPM, 0.5 kg·cm stall torque.
+# Agent motors: N20 12 V, 400 RPM, ~1.2 kg·cm stall torque.
 #   max angular vel = 400 * 2*pi / 60 = 41.888 rad/s
-#   max stall force = 0.05 N·m
+#   max stall force = 0.12 N·m
 AGENT_MAX_RAD = 41.88
-AGENT_MAX_FORCE = 0.05
+AGENT_MAX_FORCE = 0.12
 
 # NovaMax motors: 16 mm gearmotor, 800 RPM, ~5 kg·cm stall torque.
 #   max angular vel = 800 * 2*pi / 60 = 83.776 rad/s
@@ -121,43 +145,201 @@ WHEEL_MAX_TORQUE = AGENT_MAX_FORCE
 WHEEL_OMEGA_FWD = AGENT_MAX_RAD
 FORWARD_SIGN = 1.0
 
-WHEEL_FRICTION = 1.0
-CHASSIS_FRICTION = 0.4
+# Raised 1.0 → 2.0 to fix the rear-push bug: at 1.0 the per-wheel
+# thrust margin over a braking opponent was only ~0.4 N, so even a
+# stationary enemy resisted being pushed. Real silicone tire on wood
+# is μ ≈ 1.5–2.0, so this stays in physical range.
+WHEEL_FRICTION = 2.0
+# Dropped from 0.4 → 0.05 to fix bot-on-bot push-stalemate. PyBullet's
+# pairwise friction is the geometric mean of the two surfaces; with 0.4
+# on both chassis (μ_pair = 0.4) tip-to-tip contact locks up because
+# the lateral component resists side-slip. At 0.05 contact slides off
+# instead of wedging. Wheels keep μ=1.0 for ground grip.
+CHASSIS_FRICTION = 0.05
 
-# Domain randomization.
-DOHYO_FRICTION_RANGE = (0.8, 1.2)
+# Stuck-detector: if both bots are in continuous contact with near-zero
+# net motion for STUCK_DETECTION_TICKS, inject equal-and-opposite
+# lateral velocity deltas perpendicular to the contact normal. Breaks
+# symmetric deadlocks that survive the friction drop above.
+STUCK_DETECTION_TICKS    = 8       # ~333 ms @ 24 Hz
+STUCK_VELOCITY_THRESHOLD = 0.05    # m/s; below this counts as "stationary"
+STUCK_KICK_SPEED         = 0.10    # m/s lateral Δv applied to each bot
+
+# Domain randomization (Step 4 — exposed as named constants so any
+# script tweaking realism can find them in one place).
+DR_FRICTION_RANGE = (0.4, 0.7)         # silicone wheels on smooth wooden dohyo (measured μ ≈ 0.55, ±0.15)
+DR_MASS_RANGE = (0.95, 1.05)           # uniform mult on each robot's chassis mass
+DR_VELOCITY_RANGE = (0.85, 1.0)        # uniform per-episode "battery sag" on max wheel ω
+DR_DEADZONE_RANGE = (0.20, 0.35)       # uniform per-episode PWM dead zone (sym, both wheels)
+DR_TOF_NOISE_SIGMA_PCT = 0.02          # gaussian σ as fraction of ENEMY_FAR_DIST
+DR_TOF_DROPOUT_PROB = 0.01             # per-sensor per-step "max-range" return
+# Pinned to a single value for the first 1M-step run so we don't debug
+# convergence + variable latency at the same time. After convergence is
+# confirmed, widen to (1, 2) for a robustness pass.
+DR_ACTION_LATENCY_CHOICES = (1,)       # discrete uniform queue depth (steps)
+
+# Legacy aliases (kept so external scripts importing these still work,
+# but they now map onto the new DR_* knobs).
+DOHYO_FRICTION_RANGE = DR_FRICTION_RANGE
 ROBOT_MASS_NOMINAL = 0.5
-ROBOT_MASS_VARIATION = 0.10
-MOTOR_SLOP_RANGE = (0.85, 1.15)
-SENSOR_DEAD_PROB = 0.20
+ROBOT_MASS_VARIATION = 0.05            # = (1.05 - 0.95) / 2 from DR_MASS_RANGE
+SENSOR_DEAD_PROB = 0.0                 # superseded by DR_TOF_DROPOUT_PROB
 
 # Sensor max range / observation normalization scale.
 ENEMY_FAR_DIST = 0.80
-LAST_SEEN_THRESHOLD = 0.5
 
-# "Peak 50%" reward stack scaled up for stronger terminal signal.
-REWARD_WIN = 1000.0
-REWARD_LOSE = -1000.0
-REWARD_TIME = 0.0
-REWARD_HUNTER = 2.0
-REWARD_TRACK = 1.0
-REWARD_COWARD = -5.0
-REWARD_PUSH = 5.0
-REWARD_FLANK = 15.0
+# last_seen_dir state machine (Step 5). Hysteresis prevents thrashing
+# when two sensors are near-equal; decay zeroes the latch when we lose
+# track of the opponent for > LAST_SEEN_DECAY_SECONDS. Mirrored byte-
+# for-byte in arduino_obs_logic.h.
+LAST_SEEN_HYSTERESIS_RATIO = 1.1
+LAST_SEEN_DECAY_SECONDS = 0.5
+LAST_SEEN_DECAY_STEPS = max(
+    1, int(round(LAST_SEEN_DECAY_SECONDS / STEP_DT_SECONDS))
+)
 
-# Trigger thresholds.
-HUNTER_MOTOR_THRESHOLD = 0.1
-COWARD_MOTOR_THRESHOLD = -0.5
-PUSH_FRONT_THRESHOLD = 0.2
-PUSH_MOTOR_THRESHOLD = 0.5
-FLANK_DOT_THRESHOLD = 0.5
+# Run 3: collapsed reward stack — terminal + ONE shaping signal.
+#
+# The run-1/run-2 stack had 8+ competing shaping signals (edge penalty,
+# coward, idle, flank, push_delta, focus, hunter, track, push) all
+# pulling at once. Net per-episode shaping went *negative* in run 1
+# (-18 mean) and the policy learned to minimise punishment by not
+# engaging. Run 3 strips everything except a single dense approach
+# signal that is positive-only — retreating gives exactly zero, not a
+# negative reward, so there is no deadlock between "don't reverse" and
+# "stay away from the edge".
+# Run 9: reward magnitudes rescaled by 100× to bring Q-values into the
+# O(1)-O(10) range SAC/TD3 critic optimisation is conditioned for. With
+# ±1000 terminals, target Q-values ran in the hundreds and critic_loss
+# oscillated 3-3000; at ±10 the same policy decisions produce well-
+# behaved gradients. Reward *ratios* are unchanged so policy preference
+# is identical.
+REWARD_WIN = 10.0             # opponent off ring (any cause)
+# Loss rewards now split by termination_reason. push_loss is the
+# "neutral" baseline — opponent earned it. self_out is punished hardest
+# because the policy has full control over not driving off the edge.
+REWARD_LOSE_PUSH   = -15.0    # opponent pushed us off
+REWARD_LOSE_MUTUAL = -20.0    # both bots off in same step
+# Bumped -25 -> -50 (2x push-loss penalty). With anisotropic friction
+# + free-spin idle, the agent can now push decisively but tends to
+# over-commit and self-out. The previous -25 was too soft a deterrent:
+# training plateau'd on novamax/rammer at 4-10% in Phase 2 because the
+# policy was indifferent between push-loss (-15) and self-out (-25).
+# Wider gap makes self-out strictly worse than getting pushed.
+REWARD_LOSE_SELF   = -50.0    # walked off without recent contact (HEAVY)
+REWARD_TIMEOUT     = -10.0
+
+# Bearing-based tracking reward (Run 14 / 2D port). Fires only when the
+# opponent is within REWARD_TRACK_RANGE (close enough that orientation
+# matters). Rewards keeping the opponent in the forward cone, punishes
+# letting it get behind.
+REWARD_TRACK_FRONT   = +0.05
+REWARD_TRACK_SIDE    = -0.10
+REWARD_TRACK_BEHIND  = -0.15
+REWARD_TRACK_RANGE   = 0.50               # only fire when dist < 50 cm
+TRACK_FRONT_HALF_RAD = math.radians(30)
+TRACK_SIDE_HALF_RAD  = math.radians(90)
+
+# Anti-flicker (Run 16 / 2D port). Penalises any tick where the
+# commanded motor pair differs from the previous tick's commanded pair.
+# Same magnitude as REWARD_TIME so flicker pays the same rate as time.
+REWARD_ACTION_CHANGE_PENALTY = -0.002
+# Small per-step cost: -0.005 * 600 = -3 max additional bias (was -300).
+REWARD_TIME = -0.005
+# Self-out vs push-loss vs mutual-out are distinguished in
+# info["termination_reason"] AND now in the reward magnitude itself.
+CONTACT_RECENT_STEPS = 2
+
+# Wedge-engagement reward (Run 7 — outward Δr signal).
+#
+# Lineage:
+#   v1 (Run 6): contactNormalOnB.z thresholded — sign was inverted,
+#               fired on tip-to-tip collisions without real lift.
+#   v2:        enemy_z > rest + 2 mm — mechanically honest lift detector
+#               but rewarded sustained holding regardless of progress
+#               toward the edge. Diagnostic showed agent could wedge
+#               for 232+ ticks without moving the opponent radially.
+#   v3 (this): per-tick CHANGE in opponent radial distance while in
+#               contact. Captures both sustained pushing AND tip-and-
+#               flick (brief contact, opponent flies outward). A fast
+#               flick that displaces the enemy 5 cm in 3 ticks scores
+#               +150 (≫ a 200-tick stalemate that moves them 1 cm =
+#               +30). The terminal +1000 win remains the dominant
+#               signal; this just tells the policy "any progress
+#               toward the edge while in contact is good".
+#
+# Scaling: 10 reward per metre = 0.10 reward per cm of outward push.
+# An episode that flicks the enemy fully off (35 cm outward) tops
+# out at +3.5; a stalemate-while-wedged scores ~0 because Δr is
+# small per tick. Win signal +10 still dominates.
+REWARD_WEDGE_PER_M = 10.0
+
+# Approach reward (post-rescale): 0.75 still rewards closing distance
+# but stays subordinate to the wedge engagement signal.
+REWARD_APPROACH = 0.75
+APPROACH_MIN = 0.001          # filter pure float-noise reward only
+
+# Engagement timer obs feature AND reward source. Counts consecutive
+# ticks where the front laser sees the enemy at wedge-contact range
+# (front_norm < ENGAGEMENT_FRONT_THRESHOLD). The normalised count
+# goes to the policy as obs[8]; the same condition pays a per-tick
+# REWARD_ENGAGE_PER_TICK shaping bonus so the policy gets a dense,
+# positive gradient toward "be in wedge-engagement position",
+# independent of whether physical contact actually happens.
+#
+# Run 10 motivation: Run 9 ended phase 1 with wedge_engaged_ticks=0
+# averaged across episodes — the policy never made contact at all,
+# so the wedge reward never fired and the only engagement signal
+# was the (small, terminal-dominated) win bonus. Without a dense
+# positioning reward there's no gradient that says "getting closer
+# to wedge contact is good"; with REWARD_ENGAGE_PER_TICK=0.10 the
+# policy gets +3 max per fully-engaged episode, comparable to the
+# ±10 terminal but cheap to earn — turns approach-then-engage from
+# a sparse-reward bandit problem into a dense gradient ascent.
+ENGAGEMENT_FRONT_THRESHOLD = 0.15
+ENGAGEMENT_MAX_STEPS = 30          # ~1.25 s @ 24 Hz
+REWARD_ENGAGE_PER_TICK = 0.10
+
+# Run 11 (DQN port): Narek-style discrete action map + semantic
+# action-conditioned reward shaping. The 9-action grid is the
+# Cartesian product of (left_motor, right_motor) each ∈ {-1, 0, +1},
+# matching the discrete keyboard inputs that produced the offline-
+# trained DQN at github.com/Narek2008654/Simulator. The shaped
+# rewards reproduce that repo's reward function:
+#   idle (0, 0)                              -> -0.2
+#   any -1 wheel AND front_norm < threshold  -> -0.5  (retreat-close)
+#   any +1 wheel AND front_norm < threshold  -> +0.3  (attack-close)
+# Spinning in place (one wheel +1, the other -1) triggers BOTH gates
+# at once; net is -0.2 — same as idle, mild discouragement.
+DISCRETE_ACTION_MAP: tuple[tuple[float, float], ...] = (
+    (-1.0, -1.0), (-1.0,  0.0), (-1.0, +1.0),
+    ( 0.0, -1.0), ( 0.0,  0.0), ( 0.0, +1.0),
+    (+1.0, -1.0), (+1.0,  0.0), (+1.0, +1.0),
+)
+NAREK_CLOSE_THRESHOLD = ENGAGEMENT_FRONT_THRESHOLD
+NAREK_IDLE_PENALTY    = -0.2
+NAREK_RETREAT_PENALTY = -0.5
+NAREK_ATTACK_BONUS    = +0.3
 
 # Curriculum.
-CURRICULUM_PROB = 0.25
-EDGE_SPAWN_RADIUS = 0.30
+# `novamax_torque_mult` is the canonical curriculum knob: a scalar in
+# [NOVAMAX_TORQUE_MULT_MIN, 3.0]. The lerp anchors at mult=1.0 (matched
+# agent strength) and mult=3.0 (full bullet); for mult < 1.0 we LINEARLY
+# EXTRAPOLATE below the matched endpoint so phase 0 of the reverse
+# curriculum (Run 6) can produce sub-agent opponents the agent's
+# wedge can reliably overpower. The MIN floor is a safety bound to
+# stop pathological negative-torque values.
+# Run 12: floor lowered from 0.5 to 0.3 so offline data collection can
+# use very weak opponents (force ~0.01 N·m, near-zero pushing power)
+# against which the scripted combat policy reliably wins. The agent
+# learns engagement basics from these wins; online curriculum ramps
+# back up to mult=3.0.
+NOVAMAX_TORQUE_MULT_MIN = 0.3
+NOVAMAX_TORQUE_MULT_REF = 1.0   # reference point: opponent matches agent
+NOVAMAX_TORQUE_MULT_MAX = 3.0
 
 FALL_Z = 0.0
-MAX_EPISODE_STEPS = 500
+MAX_EPISODE_STEPS = 600   # 25 s @ 24 Hz; longer episodes let the agent recover from a failed engagement
 
 
 class NovamaxController:
@@ -187,6 +369,18 @@ class NovamaxController:
     def is_edge_braking(self) -> bool:
         """True while the controller is reversing/spinning away from edge."""
         return self._edge_state is not None
+
+    def force_edge_brake(self, edge_left: bool, edge_right: bool) -> None:
+        """Watchdog hook: jump straight into the reverse phase.
+
+        The env's per-substep watchdog calls this when it detects an
+        edge before the next ``decide()`` runs, so the bullet doesn't
+        skate off the dohyo in the gap between RL steps.
+        """
+        if self._edge_state is None and (edge_left or edge_right):
+            self._edge_state = "reverse"
+            self._edge_timer = self.EDGE_REVERSE_STEPS
+            self._edge_spin_dir = +1 if edge_left else -1
 
     # Real-world NovaMax wheel speeds (rad/s) for the ATTACK state. The env
     # clips them to the active level's max_rad, so level-1 / 2 still nerf
@@ -270,8 +464,15 @@ class MiniSumoEnv(gym.Env):
         human_enemy: bool = False,
         novamax_level: int = 3,
         novamax_torque_mult: Optional[float] = None,
+        force_opponent_id: Optional[str] = None,
+        action_space_kind: str = "continuous",
+        narek_reward: bool = False,
+        tracking_reward: bool = False,
+        action_consistency_reward: bool = False,
     ) -> None:
         super().__init__()
+        self.tracking_reward = bool(tracking_reward)
+        self.action_consistency_reward = bool(action_consistency_reward)
 
         self.gui = gui
         # Legacy knob kept so old call-sites still work; novamax_level
@@ -286,17 +487,44 @@ class MiniSumoEnv(gym.Env):
         self.novamax_torque_mult: Optional[float] = (
             float(novamax_torque_mult) if novamax_torque_mult is not None else None
         )
+        # Eval / debugging override: pin the opponent to a specific zoo
+        # entry. When None (default), reset() uniformly samples each
+        # episode.  Set to e.g. "spinner" to lock in one controller.
+        self.force_opponent_id: Optional[str] = force_opponent_id
         # When True, the blue robot is driven by keyboard (WASD / arrows)
         # instead of the NovamaxController. Requires gui=True.
         self.human_enemy = bool(human_enemy)
         self._client_id = -1
         self._connect()
 
-        self.action_space = spaces.Box(
-            low=-1.0, high=1.0, shape=(2,), dtype=np.float32,
-        )
+        # Run 11: action space is either continuous (default — used by
+        # TD3 / SAC) or discrete 9-action grid (used by DQN). The
+        # discrete grid maps idx → (left_motor, right_motor) via
+        # DISCRETE_ACTION_MAP. step() handles the decode internally so
+        # all downstream physics/reward code sees floats.
+        if action_space_kind not in ("continuous", "discrete"):
+            raise ValueError(
+                f"action_space_kind must be 'continuous' or 'discrete', "
+                f"got {action_space_kind!r}"
+            )
+        self.action_space_kind = action_space_kind
+        self.narek_reward = bool(narek_reward)
+        if action_space_kind == "discrete":
+            self.action_space = spaces.Discrete(len(DISCRETE_ACTION_MAP))
+        else:
+            self.action_space = spaces.Box(
+                low=-1.0, high=1.0, shape=(2,), dtype=np.float32,
+            )
+        # 12D obs (Run 9): 3 forward laser distances, last_seen_dir, 2
+        # line sensors, prev_left/prev_right, engagement_timer,
+        # yaw_rate_proxy, front_ir_delta, lateral_ir_delta. The two
+        # delta features are temporal derivatives of the IR distances:
+        # they tell the policy whether the opponent is closing in
+        # (negative) or escaping (positive) and at what rate, which the
+        # 10D-instantaneous obs cannot express. Critical for predicting
+        # Dodger-style pivot evasion.
         self.observation_space = spaces.Box(
-            low=-1.0, high=1.0, shape=(4,), dtype=np.float32,
+            low=-1.0, high=1.0, shape=(12,), dtype=np.float32,
         )
 
         self.robot_id: Optional[int] = None
@@ -307,10 +535,26 @@ class MiniSumoEnv(gym.Env):
         self._enemy_left_idx: Optional[int] = None
         self._enemy_right_idx: Optional[int] = None
 
+        # Default opponent; reset() draws a fresh one from the zoo.
         self._enemy_ctrl = NovamaxController()
+        self._opponent_id: str = "novamax"
         self._disabled_sensor: Optional[int] = None
 
         self.last_seen_dir: float = 0.0
+        self._steps_since_last_hit: int = 0
+        # Run 2: prev_action latch (raw policy output, before deadzone /
+        # latency) and engagement timer (close-front consecutive ticks).
+        self._prev_action: tuple[float, float] = (0.0, 0.0)
+        self._engagement_timer: int = 0
+        # Run 6: yaw-rate proxy (decayed accumulator of left-right diff).
+        self._yaw_rate_proxy: float = 0.0
+        # Run 9: previous-frame normalised IR readings, used to compute
+        # the two temporal-derivative obs features (front_ir_delta and
+        # lateral_ir_delta). 1.0 = "no hit" so the very first observation
+        # produces zero delta (no spurious closing-rate signal at reset).
+        self._prev_front_norm: float = 1.0
+        self._prev_min_lateral: float = 1.0
+        self._last_contact_step: int = -10_000
         self._steps = 0
         self._np_random: np.random.Generator = np.random.default_rng(seed)
 
@@ -378,7 +622,19 @@ class MiniSumoEnv(gym.Env):
         }
         for jname in ("left_wheel_joint", "right_wheel_joint"):
             if jname in joint_lookup:
-                p.changeDynamics(body_id, joint_lookup[jname], lateralFriction=WHEEL_FRICTION)
+                # Anisotropic friction: high in the rolling direction
+                # (so the wheel grips for propulsion + braking) and low
+                # in the rotation-axis direction (so the bot CAN be
+                # pushed sideways). Without this the wheel grips equally
+                # in all tangential directions — opponent's lateral
+                # grip exactly cancels agent's forward thrust → side
+                # pushes have zero net effect. The 0.3 factor on the
+                # axle axis lets a sustained ~2 N lateral force slip
+                # the wheel; well above incidental contact noise but
+                # below committed pushing.
+                p.changeDynamics(body_id, joint_lookup[jname],
+                                 lateralFriction=WHEEL_FRICTION,
+                                 anisotropicFriction=[1.0, 0.3, 1.0])
         p.changeDynamics(body_id, -1, lateralFriction=CHASSIS_FRICTION)
         if "front_caster_joint" in joint_lookup:
             p.changeDynamics(
@@ -455,12 +711,11 @@ class MiniSumoEnv(gym.Env):
         if not (edge_left or edge_right):
             return False
 
-        # Manually push the controller into the reverse phase. The next
-        # decide() call will continue the reverse → spin sequence at
-        # EDGE_SAFE_SPEED so the chassis keeps traction.
-        self._enemy_ctrl._edge_state = "reverse"
-        self._enemy_ctrl._edge_timer = self._enemy_ctrl.EDGE_REVERSE_STEPS
-        self._enemy_ctrl._edge_spin_dir = +1 if edge_left else -1
+        # Push the controller into the reverse phase. Each opponent
+        # implements force_edge_brake(); the next decide() call continues
+        # the reverse → spin sequence at safe speed so the chassis keeps
+        # traction.
+        self._enemy_ctrl.force_edge_brake(edge_left, edge_right)
 
         # Instant stop: kill linear momentum and wheel rotation. Keep
         # angular velocity so the body can pivot during the spin phase.
@@ -498,22 +753,65 @@ class MiniSumoEnv(gym.Env):
         )
         return True
 
-    def _novamax_line_triggered(self, body_x: float, body_y: float) -> bool:
-        """Return True when the corner (body_x, body_y) on the enemy chassis
-        is over the dohyo's white border ring (i.e. line sensor fires)."""
-        pos, orn = p.getBasePositionAndOrientation(self.enemy_id)
+    def _line_triggered_at(
+        self, body_id: int, body_x: float, body_y: float,
+    ) -> bool:
+        """Return True when the body-frame point (body_x, body_y) on the
+        given body is over the dohyo's white border ring."""
+        pos, orn = p.getBasePositionAndOrientation(body_id)
         yaw = p.getEulerFromQuaternion(orn)[2]
         cy, sy = math.cos(yaw), math.sin(yaw)
         wx = pos[0] + cy * body_x - sy * body_y
         wy = pos[1] + sy * body_x + cy * body_y
         return math.hypot(wx, wy) > INNER_RADIUS
 
+    def _novamax_line_triggered(self, body_x: float, body_y: float) -> bool:
+        """Backwards-compat wrapper for the enemy's line sensors."""
+        return self._line_triggered_at(self.enemy_id, body_x, body_y)
+
+    def _novamax_caps(self) -> tuple[float, float]:
+        """Resolve NovaMax's current (max_rad, max_force).
+
+        ``self.novamax_torque_mult`` is the canonical curriculum knob.
+        The lerp anchors on mult=1.0 (matched agent strength) and
+        mult=3.0 (full bullet); for mult < 1.0 we LINEARLY EXTRAPOLATE
+        below the matched endpoint so phase 0 of the reverse curriculum
+        can produce a sub-agent opponent. The input mult is clamped
+        to [NOVAMAX_TORQUE_MULT_MIN, 3.5] for safety.
+
+        Run-6 worked example: mult=0.7 → t=-0.15 →
+            max_rad ≈ 35.6 rad/s (~340 RPM)
+            max_force ≈ 0.063 N·m (~53% of agent's 0.12 N·m)
+        """
+        if self.novamax_torque_mult is not None:
+            mult = max(NOVAMAX_TORQUE_MULT_MIN,
+                       min(3.5, float(self.novamax_torque_mult)))
+            # Anchored at REF=1.0 (matched), span = MAX - REF = 2.0.
+            # NO clamp on `t`: linear extrapolation for mult < 1.0
+            # gives genuinely weaker-than-agent opponents.
+            t = (mult - NOVAMAX_TORQUE_MULT_REF) / (
+                NOVAMAX_TORQUE_MULT_MAX - NOVAMAX_TORQUE_MULT_REF
+            )
+            max_rad = AGENT_MAX_RAD + t * (NOVAMAX_MAX_RAD - AGENT_MAX_RAD)
+            max_force = AGENT_MAX_FORCE + t * (NOVAMAX_MAX_FORCE - AGENT_MAX_FORCE)
+            # Floor both at small positive values — at MIN=0.5 the
+            # extrapolated force lands ~0.025 N·m which is fine, but
+            # defend against future MIN tweaks producing negatives.
+            max_rad = max(1.0, max_rad)
+            max_force = max(0.01, max_force)
+        else:
+            max_rad, max_force = NOVAMAX_LEVELS.get(
+                self.novamax_level, NOVAMAX_LEVELS[3],
+            )
+        # Battery sag affects both bots symmetrically.
+        return max_rad * self._velocity_factor, max_force
+
     def _raw_distances(self) -> list[Optional[float]]:
         # All three VL53L1X sensors mounted near the front of the chassis
-        # (x ≈ 0.040, just behind the wedge tip), pointing forward in a
+        # (x ≈ 0.045, just behind the wedge tip), pointing forward in a
         # 60° cone: the front sensor straight ahead, the side sensors
         # angled 30° outward to the left and right.
-        sensor_x = 0.040
+        sensor_x = 0.045
         sensor_y = 0.0
         cos30 = math.cos(math.radians(30.0))
         sin30 = math.sin(math.radians(30.0))
@@ -536,6 +834,20 @@ class MiniSumoEnv(gym.Env):
         ]
         if self._disabled_sensor is not None:
             readings[self._disabled_sensor] = None
+        # Per-step ToF noise + dropout (Step 4 domain randomization).
+        if self._tof_noise_sigma > 0.0 or self._tof_dropout_prob > 0.0:
+            for i, r in enumerate(readings):
+                if r is None:
+                    continue
+                if self._np_random.random() < self._tof_dropout_prob:
+                    readings[i] = None
+                    continue
+                noisy = r + float(self._np_random.normal(0.0, self._tof_noise_sigma))
+                # Clip to a physical range. Above ENEMY_FAR_DIST = no-hit.
+                if noisy >= ENEMY_FAR_DIST:
+                    readings[i] = None
+                else:
+                    readings[i] = max(0.0, noisy)
         return readings
 
     @staticmethod
@@ -544,40 +856,147 @@ class MiniSumoEnv(gym.Env):
             return 1.0
         return min(1.0, max(0.0, distance / ENEMY_FAR_DIST))
 
+    @staticmethod
+    def _sensor_strength(d: Optional[float]) -> float:
+        """Convert raw distance (m) to strength in [0, 1]. Closer = stronger.
+        ``None`` or readings >= ENEMY_FAR_DIST count as zero strength."""
+        if d is None or d >= ENEMY_FAR_DIST:
+            return 0.0
+        if d <= 0.0:
+            return 1.0
+        return 1.0 - (d / ENEMY_FAR_DIST)
+
     def _update_last_seen(self, distances: list[Optional[float]]) -> None:
+        """Argmax over (front, left, right) strengths with hysteresis +
+        decay. Keep this in lock-step with arduino_obs_logic.h."""
         front, left, right = distances
-        if left is not None and self._norm(left) < LAST_SEEN_THRESHOLD:
-            self.last_seen_dir = -1.0
-        if right is not None and self._norm(right) < LAST_SEEN_THRESHOLD:
-            self.last_seen_dir = 1.0
-        if front is not None and self._norm(front) < LAST_SEEN_THRESHOLD:
-            self.last_seen_dir = 0.0
+        s_front = self._sensor_strength(front)
+        s_left = self._sensor_strength(left)
+        s_right = self._sensor_strength(right)
+        strengths = (s_front, s_left, s_right)
+        max_s = max(strengths)
+
+        # All sensors at max range / dropped out → start the decay timer.
+        if max_s <= 0.0:
+            self._steps_since_last_hit += 1
+            if self._steps_since_last_hit >= LAST_SEEN_DECAY_STEPS:
+                self.last_seen_dir = 0.0
+            return
+        self._steps_since_last_hit = 0
+
+        # Map current latched direction to a sensor index.
+        # 0 = front, 1 = left, 2 = right.
+        if self.last_seen_dir < -0.5:
+            prev_idx = 1
+        elif self.last_seen_dir > 0.5:
+            prev_idx = 2
+        else:
+            prev_idx = 0
+        prev_s = strengths[prev_idx]
+
+        # Tie-break: prefer the previous winner if it's tied with the max.
+        # Otherwise pick the first tied index in declared order
+        # (front, left, right) — matches the C++ short-circuit chain.
+        tied = [i for i, s in enumerate(strengths) if s == max_s]
+        winner = prev_idx if prev_idx in tied else tied[0]
+
+        # Hysteresis: only switch if the new winner is meaningfully
+        # stronger. prev_s == 0 ⇒ any non-zero strength clears the bar.
+        if winner != prev_idx:
+            if max_s <= LAST_SEEN_HYSTERESIS_RATIO * prev_s:
+                return
+        self.last_seen_dir = (0.0, -1.0, 1.0)[winner]
+
+    def _agent_line_sensors(self) -> tuple[float, float]:
+        """Read both QTR line sensors as floats (1.0 over white, 0.0 over black)."""
+        line_l = 1.0 if self._line_triggered_at(
+            self.robot_id, *AGENT_LINE_SENSORS[0],
+        ) else 0.0
+        line_r = 1.0 if self._line_triggered_at(
+            self.robot_id, *AGENT_LINE_SENSORS[1],
+        ) else 0.0
+        return line_l, line_r
 
     def _build_obs(self, distances: list[Optional[float]]) -> np.ndarray:
         front, left, right = distances
+        line_l, line_r = self._agent_line_sensors()
+        prev_l, prev_r = self._prev_action
+        engagement = min(1.0, self._engagement_timer / ENGAGEMENT_MAX_STEPS)
+
+        # Run 9: closing-rate features from previous-frame IR cache.
+        # Negative front_ir_delta = enemy approaching head-on; positive
+        # = enemy escaping. lateral_ir_delta uses the closer side IR so
+        # the policy sees Dodger-style pivot evasion regardless of which
+        # side the dodger spun away on. Clip + scale to [-1, +1].
+        front_norm = self._norm(front)
+        left_norm = self._norm(left)
+        right_norm = self._norm(right)
+        min_lateral = left_norm if left_norm < right_norm else right_norm
+        raw_front_delta = front_norm - self._prev_front_norm
+        raw_lateral_delta = min_lateral - self._prev_min_lateral
+        front_ir_delta = max(-1.0, min(1.0, raw_front_delta * 2.0))
+        lateral_ir_delta = max(-1.0, min(1.0, raw_lateral_delta * 2.0))
+        # Cache for next call AFTER computing the delta so this frame's
+        # delta is against the previous frame, not itself.
+        self._prev_front_norm = front_norm
+        self._prev_min_lateral = min_lateral
+
         return np.array(
-            [self._norm(front), self._norm(left), self._norm(right), self.last_seen_dir],
+            [
+                front_norm,
+                left_norm,
+                right_norm,
+                self.last_seen_dir,
+                line_l,
+                line_r,
+                prev_l,
+                prev_r,
+                engagement,
+                self._yaw_rate_proxy,
+                front_ir_delta,
+                lateral_ir_delta,
+            ],
             dtype=np.float32,
         )
 
     # ------------------------------------------------------------------
     # Action application
     # ------------------------------------------------------------------
-    def _apply_motor_velocities(self, left_cmd: float, right_cmd: float) -> None:
-        left_omega = left_cmd * WHEEL_OMEGA_FWD
-        right_omega = right_cmd * WHEEL_OMEGA_FWD
-        left_omega *= float(self._np_random.uniform(*MOTOR_SLOP_RANGE))
-        right_omega *= float(self._np_random.uniform(*MOTOR_SLOP_RANGE))
+    @staticmethod
+    def _apply_deadzone(action: float, dz: float) -> float:
+        """PWM dead-zone model: |a| < dz produces no torque, otherwise
+        rescale linearly so a = ±1 still maps to ±1 effective output.
+        """
+        if dz <= 0.0:
+            return action
+        if dz >= 1.0:
+            return 0.0
+        mag = max(0.0, abs(action) - dz) / (1.0 - dz)
+        return math.copysign(mag, action) if action != 0.0 else 0.0
 
+    def _apply_motor_velocities(self, left_cmd: float, right_cmd: float) -> None:
+        # Per-episode "battery sag" on the wheel-velocity cap.
+        cap = WHEEL_OMEGA_FWD * self._velocity_factor
+        left_omega = left_cmd * cap
+        right_omega = right_cmd * cap
+
+        # Idle = free-spin (force=0). Real DC motors at zero voltage have
+        # only back-EMF resistance — they do NOT actively brake. Sending
+        # force=WHEEL_MAX_TORQUE with targetVelocity=0 was modelling an
+        # active-brake that exceeded the agent's push capacity, making it
+        # impossible to shove an idle opponent off the dohyo. Threshold
+        # tolerates float noise in continuous commands (NovaMax outputs).
+        left_force  = WHEEL_MAX_TORQUE if abs(left_cmd)  > 0.05 else 0.0
+        right_force = WHEEL_MAX_TORQUE if abs(right_cmd) > 0.05 else 0.0
         p.setJointMotorControl2(
             bodyUniqueId=self.robot_id, jointIndex=self._left_wheel_idx,
             controlMode=p.VELOCITY_CONTROL,
-            targetVelocity=FORWARD_SIGN * left_omega, force=WHEEL_MAX_TORQUE,
+            targetVelocity=FORWARD_SIGN * left_omega, force=left_force,
         )
         p.setJointMotorControl2(
             bodyUniqueId=self.robot_id, jointIndex=self._right_wheel_idx,
             controlMode=p.VELOCITY_CONTROL,
-            targetVelocity=FORWARD_SIGN * right_omega, force=WHEEL_MAX_TORQUE,
+            targetVelocity=FORWARD_SIGN * right_omega, force=right_force,
         )
 
     def _apply_enemy_control(self) -> None:
@@ -594,17 +1013,7 @@ class MiniSumoEnv(gym.Env):
         edge_left = self._novamax_line_triggered(*NOVAMAX_LINE_SENSORS[0])
         edge_right = self._novamax_line_triggered(*NOVAMAX_LINE_SENSORS[1])
 
-        # Resolve the per-tier (max_rad, max_force). novamax_torque_mult
-        # (when not None) overrides the level lookup so train_novamax_v2
-        # can use intermediate steps like 1.5× / 2.0×.
-        if self.novamax_torque_mult is not None:
-            mult = float(self.novamax_torque_mult)
-            max_rad = AGENT_MAX_RAD * mult
-            max_force = AGENT_MAX_FORCE * mult
-        else:
-            max_rad, max_force = NOVAMAX_LEVELS.get(
-                self.novamax_level, NOVAMAX_LEVELS[3],
-            )
+        max_rad, max_force = self._novamax_caps()
 
         # Did the edge state machine kick in this tick? (Track the
         # transition None -> active so we only instant-stop once per
@@ -638,21 +1047,41 @@ class MiniSumoEnv(gym.Env):
                 targetValue=0.0, targetVelocity=0.0,
             )
 
+        # Run 9: SYMMETRIC LATENCY+DEADZONE on the opponent's command.
+        # Only applied to the regular decide() output — edge-braking is
+        # a survival manoeuvre and must reach the motors at full
+        # authority (it's what stops the bullet from skating off-ring).
+        if not self._enemy_ctrl.is_edge_braking and max_rad > 1e-6:
+            norm_l = float(left_omega) / max_rad
+            norm_r = float(right_omega) / max_rad
+            self._enemy_action_queue.append((norm_l, norm_r))
+            if len(self._enemy_action_queue) > self._action_latency:
+                delayed_l, delayed_r = self._enemy_action_queue.pop(0)
+            else:
+                delayed_l, delayed_r = 0.0, 0.0
+            delayed_l = self._apply_deadzone(delayed_l, self._enemy_motor_deadzone)
+            delayed_r = self._apply_deadzone(delayed_r, self._enemy_motor_deadzone)
+            left_omega = delayed_l * max_rad
+            right_omega = delayed_r * max_rad
+
         left_omega = max(-max_rad, min(max_rad, float(left_omega)))
         right_omega = max(-max_rad, min(max_rad, float(right_omega)))
         # While braking, give the motors a much higher effective torque
         # cap so the reverse/spin commands actually have authority over
         # the body's momentum.
         torque = max(max_force, 2.0) if self._enemy_ctrl.is_edge_braking else max_force
+        # Idle = free-spin (see _apply_motor_velocities comment).
+        l_torque = torque if abs(left_omega)  > 0.05 * max_rad else 0.0
+        r_torque = torque if abs(right_omega) > 0.05 * max_rad else 0.0
         p.setJointMotorControl2(
             bodyUniqueId=self.enemy_id, jointIndex=self._enemy_left_idx,
             controlMode=p.VELOCITY_CONTROL,
-            targetVelocity=FORWARD_SIGN * left_omega, force=torque,
+            targetVelocity=FORWARD_SIGN * left_omega, force=l_torque,
         )
         p.setJointMotorControl2(
             bodyUniqueId=self.enemy_id, jointIndex=self._enemy_right_idx,
             controlMode=p.VELOCITY_CONTROL,
-            targetVelocity=FORWARD_SIGN * right_omega, force=torque,
+            targetVelocity=FORWARD_SIGN * right_omega, force=r_torque,
         )
 
     def _apply_human_enemy_control(self) -> None:
@@ -685,33 +1114,22 @@ class MiniSumoEnv(gym.Env):
         l_cmd = max(-1.0, min(1.0, l_cmd))
         r_cmd = max(-1.0, min(1.0, r_cmd))
 
-        max_rad, max_force = NOVAMAX_LEVELS.get(
-            self.novamax_level, NOVAMAX_LEVELS[3],
-        )
+        max_rad, max_force = self._novamax_caps()
         l_omega = l_cmd * max_rad
         r_omega = r_cmd * max_rad
-        torque = max_force
+        # Idle = free-spin (see comment in _apply_motor_velocities).
+        l_torque = max_force if abs(l_cmd) > 0.05 else 0.0
+        r_torque = max_force if abs(r_cmd) > 0.05 else 0.0
         p.setJointMotorControl2(
             bodyUniqueId=self.enemy_id, jointIndex=self._enemy_left_idx,
             controlMode=p.VELOCITY_CONTROL,
-            targetVelocity=FORWARD_SIGN * l_omega, force=torque,
+            targetVelocity=FORWARD_SIGN * l_omega, force=l_torque,
         )
         p.setJointMotorControl2(
             bodyUniqueId=self.enemy_id, jointIndex=self._enemy_right_idx,
             controlMode=p.VELOCITY_CONTROL,
-            targetVelocity=FORWARD_SIGN * r_omega, force=torque,
+            targetVelocity=FORWARD_SIGN * r_omega, force=r_torque,
         )
-
-    @staticmethod
-    def _flank_dot(agent_pos, enemy_pos, enemy_yaw: float) -> float:
-        dx = agent_pos[0] - enemy_pos[0]
-        dy = agent_pos[1] - enemy_pos[1]
-        norm = math.hypot(dx, dy)
-        if norm < 1e-6:
-            return 1.0
-        vx, vy = dx / norm, dy / norm
-        fx, fy = math.cos(enemy_yaw), math.sin(enemy_yaw)
-        return vx * fx + vy * fy
 
     # ------------------------------------------------------------------
     # Gymnasium API
@@ -724,9 +1142,37 @@ class MiniSumoEnv(gym.Env):
         p.setGravity(0.0, 0.0, -9.81)
         p.setTimeStep(SIM_TIMESTEP)
 
-        surface_friction = float(self._np_random.uniform(*DOHYO_FRICTION_RANGE))
+        # ---- Per-episode domain randomization (Step 4) ----
+        surface_friction = float(self._np_random.uniform(*DR_FRICTION_RANGE))
         self._build_dohyo(surface_friction)
 
+        # Battery sag: U(0.85, 1.0) on the wheel-velocity cap, applied
+        # symmetrically to agent and NovaMax via _apply_motor_velocities
+        # / _novamax_caps.
+        self._velocity_factor = float(self._np_random.uniform(*DR_VELOCITY_RANGE))
+
+        # PWM dead zone: U(0.20, 0.35), applied at the top of step().
+        self._motor_deadzone = float(self._np_random.uniform(*DR_DEADZONE_RANGE))
+
+        # Action latency: discrete uniform over DR_ACTION_LATENCY_CHOICES.
+        idx = int(self._np_random.integers(0, len(DR_ACTION_LATENCY_CHOICES)))
+        self._action_latency = int(DR_ACTION_LATENCY_CHOICES[idx])
+        self._action_queue: list[tuple[float, float]] = []
+        # Run 9: enemy gets its own action FIFO and deadzone, same DR
+        # distributions as the agent. Symmetric handicap kills the
+        # fairness gap that let opponents (especially Dodger) react in
+        # 0 ms while the agent paid ~40 ms latency. Edge-braking
+        # bypasses these layers — see _apply_enemy_control.
+        self._enemy_action_queue: list[tuple[float, float]] = []
+        self._enemy_motor_deadzone = float(
+            self._np_random.uniform(*DR_DEADZONE_RANGE)
+        )
+
+        # ToF noise + dropout (per-step) parameters.
+        self._tof_noise_sigma = DR_TOF_NOISE_SIGMA_PCT * ENEMY_FAR_DIST
+        self._tof_dropout_prob = DR_TOF_DROPOUT_PROB
+
+        # Legacy episode-long dead sensor (still respected; default 0%).
         if self._np_random.random() < SENSOR_DEAD_PROB:
             self._disabled_sensor = int(self._np_random.integers(0, 3))
         else:
@@ -736,11 +1182,13 @@ class MiniSumoEnv(gym.Env):
         spawn_z = DOHYO_TOP_Z + 0.001
 
         # Per-robot yaw and spawn-radius jitter so the agent can't memorise
-        # a deterministic head-on charge. Yaw ±30°, radius ±5 cm.
-        yaw_jitter_a = float(self._np_random.uniform(-math.radians(30),
-                                                      math.radians(30)))
-        yaw_jitter_e = float(self._np_random.uniform(-math.radians(30),
-                                                      math.radians(30)))
+        # a deterministic head-on charge. Yaw ±10° (Run-7 fix: was ±30°,
+        # which caused ~40% of episodes to spawn the bots so far off-axis
+        # they passed each other entirely without colliding).
+        yaw_jitter_a = float(self._np_random.uniform(-math.radians(10),
+                                                      math.radians(10)))
+        yaw_jitter_e = float(self._np_random.uniform(-math.radians(10),
+                                                      math.radians(10)))
         radius_a = SPAWN_RADIUS + float(self._np_random.uniform(-0.05, 0.05))
         radius_e = SPAWN_RADIUS + float(self._np_random.uniform(-0.05, 0.05))
 
@@ -751,43 +1199,68 @@ class MiniSumoEnv(gym.Env):
         )
         agent_yaw = angle + math.pi + yaw_jitter_a
 
-        if self._np_random.random() < CURRICULUM_PROB:
-            enemy_angle = float(self._np_random.uniform(0.0, 2.0 * math.pi))
-            edge_radius = EDGE_SPAWN_RADIUS + float(
-                self._np_random.uniform(-0.05, 0.05)
-            )
-            enemy_pos = (
-                edge_radius * math.cos(enemy_angle),
-                edge_radius * math.sin(enemy_angle),
-                spawn_z,
-            )
-            enemy_yaw = enemy_angle + yaw_jitter_e
-        else:
-            enemy_pos = (
-                -radius_e * math.cos(angle),
-                -radius_e * math.sin(angle),
-                spawn_z,
-            )
-            enemy_yaw = angle + yaw_jitter_e
+        # Symmetric spawn: enemy across from agent, both at SPAWN_RADIUS
+        # with independent yaw / radius jitter. The 25% edge-spawn cheese
+        # was removed in Step 3 in favour of a smoother torque curriculum.
+        enemy_pos = (
+            -radius_e * math.cos(angle),
+            -radius_e * math.sin(angle),
+            spawn_z,
+        )
+        enemy_yaw = angle + yaw_jitter_e
 
         self.robot_id, agent_joints = self._spawn_robot(agent_pos, agent_yaw, AGENT_RGBA)
         self._left_wheel_idx = agent_joints["left_wheel_joint"]
         self._right_wheel_idx = agent_joints["right_wheel_joint"]
         self._caster_idx = agent_joints["front_caster_joint"]
-        mass_factor = 1.0 + float(self._np_random.uniform(
-            -ROBOT_MASS_VARIATION, ROBOT_MASS_VARIATION
-        ))
-        p.changeDynamics(self.robot_id, -1, mass=ROBOT_MASS_NOMINAL * mass_factor)
+        # Independent mass perturbations for each robot (Step 4).
+        agent_mass_mult = float(self._np_random.uniform(*DR_MASS_RANGE))
+        p.changeDynamics(
+            self.robot_id, -1, mass=ROBOT_MASS_NOMINAL * agent_mass_mult,
+        )
 
         self.enemy_id, enemy_joints = self._spawn_robot(
             enemy_pos, enemy_yaw, ENEMY_RGBA, urdf_path=NOVAMAX_URDF,
         )
         self._enemy_left_idx = enemy_joints["left_wheel_joint"]
         self._enemy_right_idx = enemy_joints["right_wheel_joint"]
+        enemy_mass_mult = float(self._np_random.uniform(*DR_MASS_RANGE))
+        p.changeDynamics(
+            self.enemy_id, -1, mass=ROBOT_MASS_NOMINAL * enemy_mass_mult,
+        )
+
+        # Step 8: draw a fresh opponent from the zoo each episode (or
+        # honour `force_opponent_id` when the eval / debugging caller
+        # has pinned a specific controller). Lazy-imported here so this
+        # module can finish loading first (opponents/__init__.py imports
+        # NovamaxController back from us).
+        from opponents import make_opponent, sample_opponent
+        if self.force_opponent_id is not None:
+            self._opponent_id = self.force_opponent_id
+            self._enemy_ctrl = make_opponent(self._opponent_id)
+        else:
+            self._opponent_id, self._enemy_ctrl = sample_opponent(self._np_random)
         self._enemy_ctrl.reset()
 
         self.last_seen_dir = 0.0
+        self._steps_since_last_hit = 0
+        self._prev_action = (0.0, 0.0)
+        self._engagement_timer = 0
+        self._yaw_rate_proxy = 0.0
+        # Reset previous-frame IR caches so the first delta is 0.
+        self._prev_front_norm = 1.0
+        self._prev_min_lateral = 1.0
+        # Run 6: per-episode wedge-engagement diagnostics.
+        self._wedge_total_score = 0.0
+        self._wedge_engaged_ticks = 0
+        self._wedge_being_wedged_ticks = 0
         self._steps = 0
+        # Step 6: tracks the env-step at which the last agent↔enemy
+        # contact was observed. Used to distinguish push-loss from
+        # self-out at termination.
+        self._last_contact_step = -10_000
+        # Stuck-detector counter (see STUCK_DETECTION_TICKS).
+        self._stuck_ticks = 0
 
         # 500 ms forward charge: red drives both wheels full forward,
         # blue holds still (zero target velocity). davo_sirad's hysteresis
@@ -797,19 +1270,42 @@ class MiniSumoEnv(gym.Env):
             if not p.isConnected(self._client_id):
                 break
             self._apply_motor_velocities(1.0, 1.0)
+            initial_force = self._novamax_caps()[1]
             p.setJointMotorControl2(
                 bodyUniqueId=self.enemy_id, jointIndex=self._enemy_left_idx,
                 controlMode=p.VELOCITY_CONTROL, targetVelocity=0.0,
-                force=NOVAMAX_LEVELS.get(self.novamax_level, NOVAMAX_LEVELS[3])[1],
+                force=initial_force,
             )
             p.setJointMotorControl2(
                 bodyUniqueId=self.enemy_id, jointIndex=self._enemy_right_idx,
                 controlMode=p.VELOCITY_CONTROL, targetVelocity=0.0,
-                force=NOVAMAX_LEVELS.get(self.novamax_level, NOVAMAX_LEVELS[3])[1],
+                force=initial_force,
             )
             p.stepSimulation()
             if self.gui:
                 time.sleep(SIM_TIMESTEP)
+
+        # Distance tracker initialised AFTER the initial charge so the
+        # approach reward isn't paid for motion that happened before
+        # step() ever runs.
+        agent_pos_now, _ = p.getBasePositionAndOrientation(self.robot_id)
+        enemy_pos_now, _ = p.getBasePositionAndOrientation(self.enemy_id)
+        self.prev_agent_to_enemy = math.hypot(
+            enemy_pos_now[0] - agent_pos_now[0],
+            enemy_pos_now[1] - agent_pos_now[1],
+        )
+        # Rest-z reference, kept for diagnostic scripts (trace_lift)
+        # though no longer used by the wedge reward in v3.
+        self._rest_agent_z = float(agent_pos_now[2])
+        self._rest_enemy_z = float(enemy_pos_now[2])
+        # Wedge v3: previous enemy radial distance during the current
+        # contact bout. Reset to None when contact lapses so we don't
+        # get a discontinuous Δr when contact resumes far away.
+        self._prev_enemy_r_for_wedge: float | None = None
+        # Per-component cumulative reward — emitted in info on terminal
+        # so RewardLoggerCallback can write per-component TB scalars.
+        # In Run 3 there are only two keys: "approach" and "terminal".
+        self._reward_components: dict[str, float] = {}
 
         distances = self._raw_distances()
         self._update_last_seen(distances)
@@ -820,11 +1316,40 @@ class MiniSumoEnv(gym.Env):
             zero_obs = np.zeros(self.observation_space.shape, dtype=np.float32)
             return zero_obs, 0.0, False, True, {"disconnected": True}
 
-        action = np.asarray(action, dtype=np.float32).flatten()
-        if action.shape != (2,):
-            raise ValueError(f"action must be (2,), got {action.shape}")
-        left_cmd = float(np.clip(action[0], -1.0, 1.0))
-        right_cmd = float(np.clip(action[1], -1.0, 1.0))
+        # Run 11: decode discrete action int to (left, right) pair via
+        # DISCRETE_ACTION_MAP. Continuous action passes through unchanged.
+        if self.action_space_kind == "discrete":
+            try:
+                action_idx = int(np.asarray(action).item())
+            except (ValueError, TypeError):
+                raise ValueError(
+                    f"discrete action must be a scalar int, got {action!r}"
+                )
+            if not (0 <= action_idx < len(DISCRETE_ACTION_MAP)):
+                raise ValueError(
+                    f"discrete action {action_idx} out of range "
+                    f"[0, {len(DISCRETE_ACTION_MAP)})"
+                )
+            raw_left, raw_right = DISCRETE_ACTION_MAP[action_idx]
+        else:
+            action = np.asarray(action, dtype=np.float32).flatten()
+            if action.shape != (2,):
+                raise ValueError(f"action must be (2,), got {action.shape}")
+            raw_left = float(np.clip(action[0], -1.0, 1.0))
+            raw_right = float(np.clip(action[1], -1.0, 1.0))
+
+        # Domain randomization (Step 4): action latency → dead zone.
+        # The new action enters the FIFO; the action that left the FIFO
+        # (or zeros, while the queue is warming up) is what physically
+        # reaches the wheels this tick. Reward gates and motor commands
+        # both see the *delayed* value so attribution stays consistent.
+        self._action_queue.append((raw_left, raw_right))
+        if len(self._action_queue) > self._action_latency:
+            delayed_left, delayed_right = self._action_queue.pop(0)
+        else:
+            delayed_left, delayed_right = 0.0, 0.0
+        left_cmd = self._apply_deadzone(delayed_left, self._motor_deadzone)
+        right_cmd = self._apply_deadzone(delayed_right, self._motor_deadzone)
 
         self._apply_motor_velocities(left_cmd, right_cmd)
         if self.human_enemy:
@@ -846,57 +1371,250 @@ class MiniSumoEnv(gym.Env):
                 time.sleep(SIM_TIMESTEP)
 
         agent_pos, _ = p.getBasePositionAndOrientation(self.robot_id)
-        enemy_pos, enemy_orn = p.getBasePositionAndOrientation(self.enemy_id)
+        enemy_pos, _ = p.getBasePositionAndOrientation(self.enemy_id)
         agent_out = agent_pos[2] < FALL_Z
         enemy_out = enemy_pos[2] < FALL_Z
 
-        reward = REWARD_TIME
+        # Single contact query reused for recency tracking AND the
+        # Run-6 wedge-engagement reward. cheaper than two calls and
+        # keeps the two consumers from drifting on what counts as
+        # "contact this tick".
+        contacts = p.getContactPoints(
+            bodyA=self.robot_id, bodyB=self.enemy_id,
+        )
+        if contacts:
+            self._last_contact_step = self._steps
+
+        # Stuck-detector: when both bots are in continuous contact with
+        # near-zero linear motion, the iterative solver has reached a
+        # symmetric wedge stalemate that wheels alone won't break. After
+        # STUCK_DETECTION_TICKS of this state, inject equal-and-opposite
+        # lateral Δv perpendicular to the contact normal — breaks the
+        # symmetry without favoring either bot, so trained policies can't
+        # game it. Skip when bots are at rest pre-engagement (no contact).
+        if contacts and not (agent_out or enemy_out):
+            a_lv, a_ang = p.getBaseVelocity(self.robot_id)
+            e_lv, e_ang = p.getBaseVelocity(self.enemy_id)
+            a_speed = math.hypot(a_lv[0], a_lv[1])
+            e_speed = math.hypot(e_lv[0], e_lv[1])
+            if a_speed < STUCK_VELOCITY_THRESHOLD and e_speed < STUCK_VELOCITY_THRESHOLD:
+                self._stuck_ticks += 1
+            else:
+                self._stuck_ticks = 0
+            if self._stuck_ticks >= STUCK_DETECTION_TICKS:
+                normal = contacts[0][7]  # contactNormalOnB
+                perp_x, perp_y = -normal[1], normal[0]
+                sign = 1.0 if self._np_random.random() < 0.5 else -1.0
+                dvx = perp_x * STUCK_KICK_SPEED * sign
+                dvy = perp_y * STUCK_KICK_SPEED * sign
+                p.resetBaseVelocity(
+                    self.robot_id,
+                    linearVelocity=[a_lv[0] + dvx, a_lv[1] + dvy, a_lv[2]],
+                    angularVelocity=a_ang,
+                )
+                p.resetBaseVelocity(
+                    self.enemy_id,
+                    linearVelocity=[e_lv[0] - dvx, e_lv[1] - dvy, e_lv[2]],
+                    angularVelocity=e_ang,
+                )
+                self._stuck_ticks = 0
+        else:
+            self._stuck_ticks = 0
+
+        # Run 3: collapsed reward — terminal + ONE shaping signal
+        # (per-tick approach delta). All shaping branches from runs 1/2
+        # (hunter, track, edge, push_delta, focus, push, flank, idle,
+        # coward, monotonic-approach) are gone. Self-out / push-loss /
+        # mutual-out distinction kept in info but rewards are unified.
+        components: dict[str, float] = {}
+        terminal = 0.0
         terminated = False
+        termination_reason: Optional[str] = None
 
         if agent_out or enemy_out:
-            if enemy_out and not agent_out:
-                reward += REWARD_WIN
-            else:
-                reward += REWARD_LOSE
             terminated = True
             distances = [None, None, None]
+            if enemy_out and not agent_out:
+                terminal = REWARD_WIN
+                termination_reason = "win"
+            else:
+                # Loss reward varies by reason: self-out is hardest punished
+                # because the agent had full control over not driving off.
+                if agent_out and enemy_out:
+                    termination_reason = "mutual_out"
+                    terminal = REWARD_LOSE_MUTUAL
+                elif self._steps - self._last_contact_step <= CONTACT_RECENT_STEPS:
+                    termination_reason = "push_loss"
+                    terminal = REWARD_LOSE_PUSH
+                else:
+                    termination_reason = "self_out"
+                    terminal = REWARD_LOSE_SELF
         else:
             distances = self._raw_distances()
+            # front_norm drives the engagement timer (obs feature). The
+            # other two normalised readings only matter for _build_obs,
+            # which calls _norm() itself when it builds the obs vector.
             front_norm = self._norm(distances[0])
-            left_norm = self._norm(distances[1])
-            right_norm = self._norm(distances[2])
+            if front_norm < ENGAGEMENT_FRONT_THRESHOLD:
+                self._engagement_timer += 1
+                # Run 10: pay a per-tick proximity bonus while the front
+                # IR has the enemy in wedge-contact range. Dense gradient
+                # for "get into engagement position" — fills the dead
+                # signal between approach (rewarded only on Δdistance)
+                # and wedge (rewarded only on physical contact + push).
+                components["engage"] = REWARD_ENGAGE_PER_TICK
+            else:
+                self._engagement_timer = 0
 
-            # Hunter: charge forward when something is in front.
-            if (front_norm < 1.0
-                    and left_cmd > HUNTER_MOTOR_THRESHOLD
-                    and right_cmd > HUNTER_MOTOR_THRESHOLD):
-                reward += REWARD_HUNTER
+            # Run 11: Narek-style action-conditioned reward shaping.
+            # Mirrors github.com/Narek2008654/Simulator/data_reader.py.
+            # Computed on the COMMANDED action (raw_left/raw_right pre-
+            # deadzone) so the policy sees a consistent signal about
+            # its own choices, not the post-DR filtered output.
+            if self.narek_reward:
+                close = front_norm < NAREK_CLOSE_THRESHOLD
+                is_idle = (raw_left == 0.0) and (raw_right == 0.0)
+                has_neg = (raw_left == -1.0) or (raw_right == -1.0)
+                has_pos = (raw_left == +1.0) or (raw_right == +1.0)
+                narek_sum = 0.0
+                if is_idle:
+                    narek_sum += NAREK_IDLE_PENALTY
+                if has_neg and close:
+                    narek_sum += NAREK_RETREAT_PENALTY
+                if has_pos and close:
+                    narek_sum += NAREK_ATTACK_BONUS
+                if narek_sum != 0.0:
+                    components["narek"] = narek_sum
 
-            # Tracking: turn toward whichever side sensor is hit.
-            if left_norm < 1.0 and left_cmd < right_cmd:
-                reward += REWARD_TRACK
-            if right_norm < 1.0 and left_cmd > right_cmd:
-                reward += REWARD_TRACK
+            # 2D-ported Run 16: action persistence (anti-flicker).
+            # Fires before tracking so both signals can hit the same tick.
+            if self.action_consistency_reward:
+                prev_l, prev_r = self._prev_action
+                if (raw_left != prev_l) or (raw_right != prev_r):
+                    components["consistency"] = REWARD_ACTION_CHANGE_PENALTY
 
-            # Coward: heavy reverse on both motors.
-            if left_cmd < COWARD_MOTOR_THRESHOLD and right_cmd < COWARD_MOTOR_THRESHOLD:
-                reward += REWARD_COWARD
+            # 2D-ported Run 14: bearing-based tracking reward. Uses the
+            # agent's world-frame yaw (PyBullet quaternion → euler[2])
+            # and the opponent's world-frame xy. Encourages the policy
+            # to keep the enemy in its forward cone when within 50 cm.
+            if self.tracking_reward:
+                dx = enemy_pos[0] - agent_pos[0]
+                dy = enemy_pos[1] - agent_pos[1]
+                dist_xy = math.hypot(dx, dy)
+                if dist_xy < REWARD_TRACK_RANGE:
+                    _, agent_orn = p.getBasePositionAndOrientation(self.robot_id)
+                    agent_yaw = p.getEulerFromQuaternion(agent_orn)[2]
+                    bearing_world = math.atan2(dy, dx)
+                    bl = (
+                        bearing_world - agent_yaw + math.pi
+                    ) % (2.0 * math.pi) - math.pi
+                    abs_b = abs(bl)
+                    if abs_b < TRACK_FRONT_HALF_RAD:
+                        track_val = REWARD_TRACK_FRONT
+                    elif abs_b < TRACK_SIDE_HALF_RAD:
+                        track_val = REWARD_TRACK_SIDE
+                    else:
+                        track_val = REWARD_TRACK_BEHIND
+                    components["track"] = track_val
 
-            # Pushing + flank: close-range pressure, bonus for side/rear.
-            if (front_norm < PUSH_FRONT_THRESHOLD
-                    and left_cmd > PUSH_MOTOR_THRESHOLD
-                    and right_cmd > PUSH_MOTOR_THRESHOLD):
-                reward += REWARD_PUSH
-                enemy_yaw = p.getEulerFromQuaternion(enemy_orn)[2]
-                if self._flank_dot(agent_pos, enemy_pos, enemy_yaw) < FLANK_DOT_THRESHOLD:
-                    reward += REWARD_FLANK
+            # Wedge engagement reward v3 — outward enemy displacement.
+            # Per tick during contact: reward proportional to Δenemy_r.
+            # Positive Δr (enemy pushed outward) ⇒ positive reward;
+            # negative Δr ⇒ negative reward (agent being pushed back
+            # while in contact, e.g. while being wedged with Rammer
+            # driving the agent toward center). When contact lapses
+            # the previous-r reference is cleared so we don't credit
+            # discontinuous jumps when contact resumes elsewhere.
+            wedge_delta_r = 0.0
+            if contacts:
+                enemy_r_now = math.hypot(enemy_pos[0], enemy_pos[1])
+                if self._prev_enemy_r_for_wedge is not None:
+                    wedge_delta_r = enemy_r_now - self._prev_enemy_r_for_wedge
+                    if abs(wedge_delta_r) > APPROACH_MIN:
+                        components["wedge"] = wedge_delta_r * REWARD_WEDGE_PER_M
+                self._prev_enemy_r_for_wedge = enemy_r_now
+            else:
+                self._prev_enemy_r_for_wedge = None
+            # Per-episode wedge diagnostics — accumulate signed Δr
+            # totals and tick counts so RewardLoggerCallback can dump
+            # to TB and we can tell "lots of small pushes" from
+            # "few big flicks".
+            self._wedge_total_score += wedge_delta_r * REWARD_WEDGE_PER_M
+            if wedge_delta_r > APPROACH_MIN:
+                self._wedge_engaged_ticks += 1
+            elif wedge_delta_r < -APPROACH_MIN:
+                self._wedge_being_wedged_ticks += 1
 
+            # Approach reward: raw per-step delta, halved coefficient
+            # for Run 6 (wedge is now primary shaping). Positive-only.
+            current_agent_to_enemy = math.hypot(
+                enemy_pos[0] - agent_pos[0], enemy_pos[1] - agent_pos[1],
+            )
+            approach_delta = self.prev_agent_to_enemy - current_agent_to_enemy
+            if approach_delta > APPROACH_MIN:
+                components["approach"] = approach_delta * REWARD_APPROACH
+            self.prev_agent_to_enemy = current_agent_to_enemy
+
+        # Step counter advances here so MAX_EPISODE_STEPS is checked
+        # against the count *after* this transition.
         self._steps += 1
         truncated = (not terminated) and (self._steps >= MAX_EPISODE_STEPS)
+        if truncated:
+            terminal = REWARD_TIMEOUT
+            termination_reason = "timeout"
+
+        # Run 8: per-step time cost added to break the "do nothing"
+        # attractor. Only paid on non-terminal steps (terminal already
+        # captures the episode-end signal); a passive episode now nets
+        # REWARD_TIMEOUT + 600 * REWARD_TIME = -1300, strictly worse
+        # than any episode that accumulates positive shaping.
+        if not (terminated or truncated):
+            components["time"] = REWARD_TIME
+        reward = sum(components.values()) + terminal
+
+        # Per-component cumulative bookkeeping for RewardLoggerCallback.
+        for k, v in components.items():
+            self._reward_components[k] = self._reward_components.get(k, 0.0) + v
+        if terminal:
+            self._reward_components["terminal"] = (
+                self._reward_components.get("terminal", 0.0) + terminal
+            )
 
         self._update_last_seen(distances)
+        # Latch prev_action *before* _build_obs so the obs returned by
+        # step() reflects the action just taken. raw_left/raw_right are
+        # post-clip but pre-deadzone / pre-latency, matching what the
+        # firmware can replicate without those layers.
+        self._prev_action = (raw_left, raw_right)
+        # Yaw-rate proxy: decayed accumulator of (left - right). Mirror
+        # firmware exactly: add then decay then clamp.
+        self._yaw_rate_proxy = (
+            self._yaw_rate_proxy + (raw_left - raw_right) * 0.1
+        ) * 0.9
+        if self._yaw_rate_proxy > 1.0:
+            self._yaw_rate_proxy = 1.0
+        elif self._yaw_rate_proxy < -1.0:
+            self._yaw_rate_proxy = -1.0
         obs = self._build_obs(distances)
-        info = {"agent_pos": agent_pos, "enemy_pos": enemy_pos}
+        info = {
+            "agent_pos": agent_pos,
+            "enemy_pos": enemy_pos,
+            "opponent_id": self._opponent_id,
+            "reward_components_step": components,
+        }
+        if terminated or truncated:
+            info["reward_components_episode"] = dict(self._reward_components)
+            info["termination_reason"] = termination_reason
+            info["terminal_reward"] = float(terminal)
+            # Run 6: per-episode wedge mechanics diagnostics. RAW
+            # tick counts and signed score so TB can show whether the
+            # agent actually achieves engagement (vs. just the
+            # weighted reward, which mixes magnitude with frequency).
+            info["episode_diag"] = {
+                "wedge_score_total": float(self._wedge_total_score),
+                "wedge_engaged_ticks": int(self._wedge_engaged_ticks),
+                "wedge_being_wedged_ticks": int(self._wedge_being_wedged_ticks),
+            }
         return obs, float(reward), terminated, truncated, info
 
     @property
