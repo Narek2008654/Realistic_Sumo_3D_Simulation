@@ -1,3 +1,4 @@
-pybullet
-gymnasium
-numpy
+pybullet>=3.2.5
+gymnasium>=0.29
+numpy>=1.26,<2.0
+torch==2.5.1
