@@ -42,15 +42,12 @@ import numpy as np
 import pybullet as p
 
 from sumo_env import MiniSumoEnv
-from train_dqn_3d import DuelingQNet, OBS_DIM, N_ACTIONS, NET_ARCH
+from train_dqn_3d import DuelingQNet, OBS_DIM, N_ACTIONS, NET_ARCH, BEST_PATH
 
 
 def main():
-    here = Path(__file__).parent
-    default_ckpt = here / "dqn_3d_bc_actor_best.pt"
-
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--ckpt", default=str(default_ckpt))
+    ap.add_argument("--ckpt", default=str(BEST_PATH))
     ap.add_argument("--mult", type=float, default=1.0,
                     help="opponent torque mult (only matters if you "
                          "lose; the human IS the opponent here)")

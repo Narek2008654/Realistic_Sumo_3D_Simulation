@@ -5,18 +5,20 @@ This is the env shape that produced the 45-55% SAC win-rate. One RL step
 Professional Mini Sumo Kit (heavy steel, 5 IR sensors + 2 line sensors,
 400 RPM motors); see NovamaxController for the firmware port.
 
-* Observation space — Box(low=-1, high=1, shape=(4,), float32):
-    [front_norm, left_norm, right_norm, last_seen_dir]
+* Observation space — Box(low=-1, high=1, shape=(12,), float32):
+    [front_norm, left_norm, right_norm, last_seen_dir, line_l, line_r,
+     prev_left, prev_right, engagement, yaw_rate_proxy, front_ir_delta,
+     lateral_ir_delta]
 
-* Action space — Box(low=-1, high=1, shape=(2,), float32):
-    [left_motor, right_motor]
+* Action space — discrete 9-action grid (default, used by the DQN) OR
+    continuous Box(2,); both decode to (left_motor, right_motor) in [-1, 1].
 
-* Rewards (per RL step):
-    +1000  win, -1000 loss              (terminal)
-    -0.5   per-step time penalty
-    +2     hunter   front_norm<1 AND both motors>0.1
-    +5     pushing  front_norm<0.2 AND L>0.5 AND R>0.5
-    +15    flanking pushing AND outside enemy frontal cone (dot<0.5)
+* Rewards (per step):
+    terminal win / loss-by-reason (push_loss, self_out, mutual_out) /
+    timeout, plus a positive-shaping stack: approach, engage, wedge
+    (outward enemy displacement), optional narek / tracking /
+    action-consistency, and a small per-step time penalty.
+    (See the REWARD_* constants for magnitudes.)
 """
 
 from __future__ import annotations
@@ -550,8 +552,11 @@ class MiniSumoEnv(gym.Env):
         self._yaw_rate_proxy: float = 0.0
         # Run 9: previous-frame normalised IR readings, used to compute
         # the two temporal-derivative obs features (front_ir_delta and
-        # lateral_ir_delta). 1.0 = "no hit" so the very first observation
-        # produces zero delta (no spurious closing-rate signal at reset).
+        # lateral_ir_delta). Seeded to 1.0 = "no hit", so the first delta
+        # is measured against max-range; it is only ~zero if the enemy
+        # also starts out of IR range (at spawn it usually isn't, so the
+        # first delta is typically non-zero). This matches the firmware
+        # IrDeltaState reset, so there's no sim-to-real drift.
         self._prev_front_norm: float = 1.0
         self._prev_min_lateral: float = 1.0
         self._last_contact_step: int = -10_000
@@ -1017,7 +1022,7 @@ class MiniSumoEnv(gym.Env):
 
         # Did the edge state machine kick in this tick? (Track the
         # transition None -> active so we only instant-stop once per
-        # detection, not every tick of the 5+5 brake sequence.)
+        # detection, not every tick of the 2+4 brake sequence.)
         was_braking = self._enemy_ctrl.is_edge_braking
         left_omega, right_omega = self._enemy_ctrl.decide(
             ir_hits, edge_left, edge_right,
@@ -1026,13 +1031,12 @@ class MiniSumoEnv(gym.Env):
 
         if edge_just_triggered:
             # NovaMax's 0.05 N·m stall torque can't bleed off ~1.25 kg·m/s
-            # of forward momentum in 5 ticks, so the robot would slide off
+            # of forward momentum in 2 ticks, so the robot would slide off
             # the dohyo before the reverse maneuver can take effect.
             # Instant-stop: zero the wheels and the chassis linear velocity
             # the moment the line sensor fires (preserve angular velocity
             # so the body can still pivot during the spin phase).
             _, ang_vel = p.getBaseVelocity(self.enemy_id)
-            base_pos, base_orn = p.getBasePositionAndOrientation(self.enemy_id)
             p.resetBaseVelocity(
                 self.enemy_id,
                 linearVelocity=[0.0, 0.0, 0.0],
@@ -1262,10 +1266,13 @@ class MiniSumoEnv(gym.Env):
         # Stuck-detector counter (see STUCK_DETECTION_TICKS).
         self._stuck_ticks = 0
 
-        # 500 ms forward charge: red drives both wheels full forward,
-        # blue holds still (zero target velocity). davo_sirad's hysteresis
-        # only ticks while we're calling _apply_enemy_control, which we
-        # skip here, so it just observes the runup.
+        # Initial agent-only charge: DISABLED (INITIAL_CHARGE_MS = 0 ->
+        # INITIAL_CHARGE_TICKS == 0, so the loop runs 0 iterations). It
+        # only runs if INITIAL_CHARGE_MS is set > 0, in which case red
+        # drives both wheels full forward while blue holds still (zero
+        # target velocity). davo_sirad's hysteresis only ticks while we're
+        # calling _apply_enemy_control, which we skip here, so it just
+        # observes the runup.
         for _ in range(INITIAL_CHARGE_TICKS):
             if not p.isConnected(self._client_id):
                 break
@@ -1566,7 +1573,7 @@ class MiniSumoEnv(gym.Env):
         # Run 8: per-step time cost added to break the "do nothing"
         # attractor. Only paid on non-terminal steps (terminal already
         # captures the episode-end signal); a passive episode now nets
-        # REWARD_TIMEOUT + 600 * REWARD_TIME = -1300, strictly worse
+        # REWARD_TIMEOUT + 600 * REWARD_TIME = -13, strictly worse
         # than any episode that accumulates positive shaping.
         if not (terminated or truncated):
             components["time"] = REWARD_TIME

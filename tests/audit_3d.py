@@ -1,6 +1,6 @@
 """Comprehensive correctness audit for the 3D mini-sumo env.
 
-Runs ~30 self-contained tests across 9 categories and prints PASS/FAIL
+Runs 49 self-contained tests across categories A-O and prints PASS/FAIL
 for each. Categories:
 
   A. Constants sanity (mass / speed / dimensions match spec)
@@ -12,9 +12,15 @@ for each. Categories:
   G. Opponent zoo (instantiation, decide() output)
   H. Discrete action space (size, mapping, edge cases)
   I. Domain randomization (does it actually vary?)
+  J. last_seen_dir state machine
+  K. Engagement timer + engage reward
+  L. Action latency queue
+  M. Reward components
+  N. yaw_rate_proxy
+  O. IR sensor noise + dropout DR
 
 Run:
-    python _audit_3d.py
+    python tests/audit_3d.py
 
 Exit code is 0 if all pass, 1 otherwise.
 """
@@ -34,6 +40,15 @@ import traceback
 import torch  # noqa
 import numpy as np
 import pybullet as p
+
+# Make stdout encoding-safe: a few detail strings below contain
+# non-ASCII (Delta). On Windows a redirected/piped stdout defaults
+# to cp1252, which cannot encode them and would crash the suite
+# mid-run. UTF-8 with a safe error handler keeps output readable.
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
+except (AttributeError, ValueError):
+    pass
 
 # Test bookkeeping --------------------------------------------------------------
 _passed = []
