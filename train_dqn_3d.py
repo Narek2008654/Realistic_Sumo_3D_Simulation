@@ -535,6 +535,11 @@ def online_finetune(
     ):
         env.novamax_torque_mult = float(mult)
         env.force_opponent_id = force_opp
+        # Reset the rolling WR window at each phase boundary: the
+        # best-checkpoint score = wr * mult must measure WR against the
+        # CURRENT phase opponent/mult, not stale outcomes carried over
+        # from the prior (easier) phase. Clearing on phase 1 is a no-op.
+        recent_outcomes.clear()
         # Phase bump: re-inject exploration on every curriculum
         # boundary so new opponents / mults get probed before the
         # decayed eps locks the policy into greedy play.

@@ -1,7 +1,7 @@
 """Watch the trained DQN play inside the 3D PyBullet sim.
 
-Loads ``dqn_actor_best.pt`` (the 2D-trained model copied here) and
-opens MiniSumoEnv with ``gui=True``, which spawns PyBullet's debug
+Loads ``checkpoints/dqn_3d_bc_actor_best.pt`` (the 3D BC-pretrained
+DQN) and opens MiniSumoEnv with ``gui=True``, which spawns PyBullet's debug
 window. The env already paces stepSimulation at real time when
 gui=True, so playback runs at the env's 25 Hz tick rate naturally.
 
@@ -12,7 +12,7 @@ Controls:
 Usage:
     python watch_3d.py                          # zoo, mult=1.0
     python watch_3d.py --opp novamax --mult 3.0
-    python watch_3d.py --ckpt dqn_actor_final.pt
+    python watch_3d.py --ckpt checkpoints/dqn_3d_bc_actor_final.pt
 """
 
 from __future__ import annotations

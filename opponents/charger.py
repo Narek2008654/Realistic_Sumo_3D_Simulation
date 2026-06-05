@@ -61,10 +61,10 @@ class Charger(OpponentController):
 
         # Priority 3: search in last-seen direction (matches the spin
         # direction charge_policy emits when last_seen_dir is set).
-        if self.last_seen == -1:
-            return self.FULL * 0.6, -self.FULL * 0.6  # spin in place
-        if self.last_seen == +1:
+        if self.last_seen == -1:   # agent last seen on the LEFT -> spin left to re-acquire
             return -self.FULL * 0.6, self.FULL * 0.6
+        if self.last_seen == +1:   # agent last seen on the RIGHT -> spin right to re-acquire
+            return self.FULL * 0.6, -self.FULL * 0.6
         # Default: search spin to find the agent. Mirrors charge_policy's
         # (+0.6, -0.6) when no detection has happened yet.
         return self.FULL * 0.6, -self.FULL * 0.6
