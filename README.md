@@ -1,136 +1,170 @@
 # Realistic Sumo 3D Simulation
 
-PyBullet-based mini-sumo arena for training a reinforcement-learning policy that deploys to an Arduino Nano. The agent learns to push 6 different scripted opponents off a 70 cm dohyo, then its weights are exported as a PROGMEM C++ header for on-device inference.
+PyBullet-based mini-sumo arena for training a reinforcement-learning policy that
+deploys to an Arduino Nano. The agent learns to push a zoo of scripted opponents
+off a 70 cm dohyo using only physically-realisable sensors (3 ToF rays + 2 rear
+line sensors), then its weights are exported as a PROGMEM C++ header for
+on-device inference. Two policies are trained and deployable: a **Dueling Double
+DQN** ("Stage-A") and a stronger **discrete PPO** (the current deploy model).
 
 ![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)
 ![PyBullet](https://img.shields.io/badge/sim-PyBullet-orange.svg)
-![PyTorch](https://img.shields.io/badge/RL-PyTorch%20DQN-EE4C2C.svg)
+![PyTorch](https://img.shields.io/badge/RL-DQN%20%2B%20PPO-EE4C2C.svg)
 ![Arduino](https://img.shields.io/badge/deploy-Arduino%20Nano-00979D.svg)
 
 ## What's in the repo
 
 ```
-sumo_env.py           Gymnasium env: PyBullet world, IR raycasts, reward stack, DR
-combat_policy.py      60-line scripted policy used as BC teacher
-train_dqn_3d.py       BC pretrain + 5-phase online RL pipeline
+sumo_env.py           Gymnasium env: PyBullet world, IR raycasts, reward stack, DR,
+                      hardcoded action guards, chassis/power domain randomization
+obs_stack.py          RawDistanceStack wrapper: K=4 frame-stack -> 21-D observation
+combat_policy.py      scripted policy used as the BC teacher
+train_dqn_3d.py       DQN: BC pretrain + 5-phase online RL (Dueling Double DQN)
+train_ppo_3d.py       discrete PPO: BC warm-start, GAE, curriculum, resume/zero-entropy/
+                      robust modes, watch-every-100k
 export_weights.py     PyTorch state-dict -> PROGMEM C++ header
-opponents/            6 zoo controllers (dodger, spinner, rammer, wedger, novamax, charger)
+opponents/            7 zoo controllers (dodger, spinner, rammer, wedger, novamax,
+                      charger, davo) + 2 held-out (feinter, orbiter)
 assets/               robot.urdf, novamax.urdf, STL meshes
-scripts/              entry-point scripts (watch, play, eval, human data collect)
-tests/audit_3d.py     49-test correctness suite (run after any env change)
-checkpoints/          committed model weights
-firmware/             Arduino headers + sketches
-firmware/v3_deploy/   ready-to-flash Arduino Nano sketch for the v3 model
+scripts/              watch_3d, watch_gauntlet, play_vs_dqn_3d, eval_best,
+                      agent_vs_agent (self-play head-to-head), human_play
+tests/audit_3d.py     86-test correctness suite (run after any env change)
+checkpoints/          committed model weights (DQN Stage-A + PPO line)
+firmware/v3_deploy/   legacy 12-D DQN sketch
+firmware/v4_deploy/   Stage-A 21-D DQN sketch (K=4 ring buffer)
+firmware/v5_deploy/   PPO robust 21-D sketch + the 4 hardcoded action guards  <-- deploy
 ```
 
 ## Architecture
 
-**Observation (12D):**
+**Observation (21-D)** — `obs_stack.RawDistanceStack` stacks the 3 ToF distances over
+the last `K=4` frames (oldest-first) and appends 9 single-frame engineered features:
 
-| idx | feature | range |
+| block | feature | range |
 |---|---|---|
-| 0-2 | front / left / right IR normalised distance | [0, 1] |
-| 3 | `last_seen_dir` latch | {-1, 0, +1} |
-| 4-5 | rear-left / rear-right line sensors over white border | {0, 1} |
-| 6-7 | previous tick's raw motor command | [-1, +1] |
-| 8 | engagement timer (consecutive ticks with front IR < 0.15) | [0, 1] |
-| 9 | yaw-rate proxy (decayed L-R accumulator) | [-1, +1] |
-| 10 | front-IR temporal delta | [-1, +1] |
-| 11 | lateral-IR temporal delta | [-1, +1] |
+| 0-11 | front/left/right normalised distance × 4 stacked frames | [0, 1] |
+| 12 | `last_seen_dir` latch | {-1, 0, +1} |
+| 13-14 | rear-left / rear-right line sensors over the white border | {0, 1} |
+| 15-16 | previous tick's raw motor command | [-1, +1] |
+| 17 | engagement timer (consecutive ticks with front IR < 0.15) | [0, 1] |
+| 18 | yaw-rate proxy (decayed L-R accumulator) | [-1, +1] |
+| 19-20 | front- / lateral-IR temporal deltas (closing rate) | [-1, +1] |
 
-**Action:** `Discrete(9)` — Cartesian product of `(-1, 0, +1)` on each wheel.
+**Action:** `Discrete(9)` — Cartesian product of `(-1, 0, +1)` on each wheel
+(continuous `Box(2,)` is also wired in the env).
 
-**Network:** Dueling Double DQN, MLP trunk `[48, 48]`, n-step returns (n=3), Polyak target (τ=0.005).
+**Networks:** both use a 32×32 MLP trunk (Nano-deployable in float32).
+- DQN: Dueling Double DQN, n-step returns (n=3), Polyak target, DQfD-style demo
+  retention to prevent catastrophic forgetting.
+- PPO: actor-critic sharing `DuelingQNet`'s submodule layout (so `argmax` of the actor
+  head = the deployable action and the same export/eval tooling works), GAE(λ=0.95),
+  clipped objective + per-update KL early-stop, critic warm-up before the actor moves.
 
-**Reward stack:** terminal split (win +10, push_loss -15, mutual_out -20, self_out **-50**, timeout -10) + dense shaping (approach, engage, wedge, anti-flicker, bearing-tracking, Narek action-conditioned).
+**Hardcoded action guards** (observable-only, replicated 1:1 in firmware): a safety
+override (rear-edge reflex + anti-blind-charge), a 100 ms opening forward charge, a
+spawn guard (early net-backward → forward — kills the spawn-near-rim self-outs), and
+an anti-stall (too many idle commands → forward).
 
-**Domain randomisation per episode:** chassis mass ±5%, dohyo friction 0.4–0.7, motor deadzone 0.20–0.35, battery sag 85–100%, action latency 1 step, IR Gaussian noise σ=0.016 m, 1% per-sensor per-step dropout.
+**Reward shaping:** terminal split (win +10, push_loss -15, mutual_out -20, self_out
+-50, timeout -10) + dense shaping (approach, engage, wedge, tracking/flank, action
+consistency, plus opt-in still / backward penalties).
+
+**Domain randomization:** chassis mass ±5%, friction, motor deadzone, battery sag,
+action latency, IR Gaussian noise (per-step dropout disabled for stability), opponent
+behaviour (speed/tracking/reaction), and — for robustness training — per-episode
+opponent **power** (torque mult), and **hardware** (chassis: robot.urdf ↔ novamax.urdf).
+
+## Why the forward edge is the hard part
+
+The robot has only **rear** line sensors, so the front rim is unobservable. ~92 % of
+losses at high torque were forward drive-offs, and no reward shaping (privileged-radius,
+heavy terminal penalty, observable proxy) could fix what the policy cannot perceive. The
+working answer is hardcoded observable guards (above) + a spawn-window that turns early
+backward commands into forward — together they cut the self-out rate roughly in half.
 
 ## Physics fixes (3D PyBullet)
 
-The original env had two failure modes that prevented learning:
-- **Orbital deadlock** — both bots tracked each other but never closed (rotational symmetry). Fixed: `CHASSIS_FRICTION` 0.4 → 0.05 + stuck-detector that injects a lateral kick after 8 ticks of stationary contact.
-- **Push impotence** — even when contact happened, the agent couldn't transfer momentum. Fixed in three places:
-  - `WHEEL_FRICTION` 1.0 → 2.0 (thrust margin over braking opponent)
-  - `anisotropicFriction=[1.0, 0.3, 1.0]` on wheels (high in roll direction, low along axle — side pushes work)
-  - Idle motors free-spin (force=0 when |cmd|<0.05) — eliminates the artificial 24 N active-brake that no real DC motor exhibits
+- **Orbital deadlock** — fixed via low chassis friction + a stuck-detector lateral kick
+  after 8 ticks of stationary contact.
+- **Push impotence** — `WHEEL_FRICTION` 1→2, anisotropic wheel friction, and free-spin
+  idle motors (no artificial active-brake).
 
-See [tests/audit_3d.py](tests/audit_3d.py) — verifies these in `test_rear_push`, `test_side_push`, `test_idle_push`, `test_stuck_detector`.
+Verified in [tests/audit_3d.py](tests/audit_3d.py) (86 tests).
 
 ## Setup
 
 ```powershell
 conda create -n sumo -c conda-forge python=3.12 pybullet numpy gymnasium -y
 conda activate sumo
-pip install torch==2.5.1
+pip install -r requirements.txt
 ```
 
-Windows quirks:
-- `KMP_DUPLICATE_LIB_OK=TRUE` to silence MKL/OpenMP conflict.
-- Import `torch` before `pybullet` to avoid `fbgemm.dll` race.
-- Launch via `cmd /c "call C:\Users\User\miniforge3\Scripts\activate.bat sumo && python ..."` so DLL paths are set.
+Windows quirks: set `KMP_DUPLICATE_LIB_OK=TRUE`, import `torch` before `numpy`/`pybullet`,
+and launch via `cmd /c "call ...\activate.bat sumo && python ..."` so DLL paths resolve.
 
 ## Run
 
 ```bash
-# Train (1M steps, ~3 hr): BC pretrain + 5-phase online RL curriculum.
-train.bat
-
-# Sanity-check the env (~30 s, should print "PASS: 49  FAIL: 0").
+# Sanity-check the env (~30 s, should print "PASS: 86  FAIL: 0").
 python tests/audit_3d.py
 
-# Watch the trained policy fight the zoo.
-python scripts/watch_3d.py --ckpt checkpoints/dqn_3d_bc_actor_best.pt --mult 1.0
+# Train DQN (1M steps): BC pretrain + 5-phase online curriculum.
+train.bat
 
-# Hardest matchup, full novamax torque.
-python scripts/watch_3d.py --ckpt checkpoints/dqn_3d_bc_actor_best.pt --opp novamax --mult 3.0
+# Train discrete PPO (resume/finetune from a checkpoint):
+#   PPO_RESUME=<ckpt>            continue at fixed mult 3.0
+#   PPO_ENT0=1                   zero-entropy sharpening
+#   PPO_ROBUST=1                 + opponent power/speed/hardware DR
+set PPO_RESUME=checkpoints/ppo_ent0_best.pt && set PPO_ROBUST=1 && python -u train_ppo_3d.py
 
-# Play yourself (WASD).
-python scripts/play_vs_dqn_3d.py
+# Headless eval vs the zoo + held-out (per-opponent WR + self-out breakdown):
+python scripts/eval_best.py --ckpt checkpoints/ppo_robust_best.pt --n-eps 30 --mult 3.0 --spawn-guard
 
-# Headless eval (no GUI, just numbers).
-python scripts/eval_best.py --ckpt checkpoints/dqn_3d_bc_actor_best.pt --n-eps 30 --mult 3.0
+# Watch one model fight every opponent (add --guard for the deployed config,
+# --same-chassis to put the opponent on the agent's robot, --opp <name> for one).
+python scripts/watch_gauntlet.py --ckpt checkpoints/ppo_robust_best.pt --guard --mult 3.0
 
-# Deterministic "clean" world (no DR noise / dropout / deadzone).
-python scripts/watch_3d.py --ckpt checkpoints/dqn_3d_bc_actor_best.pt --clean
+# Head-to-head between two policies (same chassis); --gui to watch.
+python scripts/agent_vs_agent.py --a checkpoints/ppo_robust_best.pt --b checkpoints/dqn3d_stack_stageA_best.pt --gui
 ```
 
-## Training pipeline
+## Results (eval at mult = 3.0, greedy)
 
-1. **Phase 0a — collection** (~5 min): `combat_policy.py` plays 20–40k env-steps against each of 6 opponents at mult=1.0; only **winning** transitions are kept. ~38k pairs total cached to `data/bc_dataset_3d_v3.npz`.
-2. **Phase 0b — BC pretrain** (~5 min): 20 epochs of MSE regression of the dueling-Q net's argmax onto CombatPolicy's discretised actions over the winners. Loss converges ~0.16.
-3. **Phase 1-5 — online RL** (~3 hr): ε-greedy fine-tune across a torque curriculum 0.7 → 1.0 → 1.5 → 2.0 → 3.0, 100k / 200k / 200k / 200k / 300k = 1M steps. ε bumps back to 0.20 at every phase boundary.
-4. **Export**: `_emit_dqn_header(BEST, firmware/neural_net_v6_3d.h)` writes the advantage head + LUT + self-test pairs as a single-file C++ header for AVR inference.
+| opponent | DQN Stage-A | **PPO robust** |
+|---|---|---|
+| seen-zoo mean | 51 % | **73 %** |
+| novamax | 52 % | **70 %** |
+| charger | — | 70 % |
+| davo (the user's scripted robot) | — | 87 % (67 % same-chassis) |
+| held-out (unseen) mean | ~48 % | **78 %** |
+| self-out rate | ~41 % | **~18 %** |
 
-## Results (v3 BEST snapshot, eval at mult=3.0)
-
-| opp | WR |
-|---|---|
-| dodger | 76% |
-| spinner | 41% |
-| novamax | 23% |
-| rammer | 27% |
-| wedger | 18% |
-| **overall** | **40%** |
-
-Compare to the SAC-era baseline (pre-physics-fixes): trackers (novamax/rammer/wedger) were all 0–10%. The combination of correct physics + BC-from-CombatPolicy warm start makes the trackers winnable.
+The PPO model meets the 65 %-overall / 55 %-novamax target with the lowest self-out
+rate, and is trained against a diverse opponent distribution (varied power, speed,
+intelligence, and hardware) so it generalises to unseen robots.
 
 ## Deploying to Arduino Nano
 
-The trained policy ships as a single C++ header (`firmware/neural_net_v6_3d.h`) containing weights in PROGMEM + a `predict_action()` forward pass. Copy that header next to the sketch and flash:
+The trained policy ships as a single C++ header (`neural_net_v6_3d.h`, weights in
+PROGMEM + a `predict_action()` forward pass) next to a sketch. Three ready folders:
 
-1. Open Arduino IDE.
-2. File → Open → `firmware/v3_deploy/v3_deploy.ino`.
-3. Tools → Board → Arduino Nano (ATmega328P, Old Bootloader if your bot uses CH340).
-4. Plug in bot, select COM port, Upload.
-5. Serial Monitor at 115200 — should print `model self-test mismatches: 0` then `ready (v3, 3D-trained)`.
+- `firmware/v5_deploy/` — **PPO robust (current)**: 21-D, K=4 distance ring buffer, all
+  four action guards replicated in `loop()`.
+- `firmware/v4_deploy/` — DQN Stage-A (21-D).
+- `firmware/v3_deploy/` — legacy 12-D DQN.
 
-**Hardware mapped in [firmware/v3_deploy/v3_deploy.ino](firmware/v3_deploy/v3_deploy.ino):**
-- 3× VL53L0X ToF sensors (front / left / right), XSHUT on D2 / D3 / D4
-- TB6612FNG motor driver: left A1/A2=D10/D9 PWM=D11, right B1/B2=D6/D7 PWM=D5, STBY=D8
-- 2× QTR-1A reflectance sensors (rear-left = A0, rear-right = A1) for the white border ring
+To flash: open the folder's `.ino` in the Arduino IDE → Board: Arduino Nano
+(ATmega328P) → Upload. Serial at 115200 prints `model self-test mismatches: 0` then
+`ready (...)`; it refuses to drive if the flashed weights are corrupted.
 
-The sketch also implements a 1.5 s search-spin watchdog and a self-test that refuses to drive motors if the weights are corrupted in flash.
+**Hardware:** 3× VL53L0X ToF (front/left/right, XSHUT D2/D3/D4), TB6612FNG motor driver
+(left A1/A2=D10/D9 PWM=D11, right B1/B2=D6/D7 PWM=D5, STBY=D8), 2× QTR-1A rear line
+sensors (A0/A1).
+
+## Branches
+
+- `alg/improvment` — the DQN line + Stage-A deploy (`firmware/v4_deploy`).
+- `pol/ppo` — the discrete PPO experiment + robust deploy (`firmware/v5_deploy`).
 
 ## Contributing
 
