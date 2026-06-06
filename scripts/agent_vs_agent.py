@@ -21,6 +21,7 @@ import pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 import argparse
+import time
 from collections import deque, Counter
 
 import torch  # noqa: F401  # before numpy (Windows DLL order)
@@ -33,6 +34,7 @@ from obs_stack import DEFAULT_STACK_K
 from sumo_env import (
     DISCRETE_ACTION_MAP, SUBSTEPS_PER_STEP, WHEEL_OMEGA_FWD, WHEEL_MAX_TORQUE,
     FORWARD_SIGN, FALL_Z, ENGAGEMENT_FRONT_THRESHOLD, ENEMY_RGBA,
+    STEP_DT_SECONDS,
 )
 
 # env obs-state attributes swapped per body so the env's own obs methods
@@ -118,21 +120,26 @@ def respawn_enemy_as_agent_robot(env_u):
     env_u._enemy_right_idx = joints["right_wheel_joint"]
 
 
-def play_match(env_u, net_agent, net_enemy, max_steps=600, contact_window=10):
-    """Returns (winner, loser_exit) where winner in {A,B,draw,timeout} and
-    loser_exit in {self_out, push, ""}. A loss with no contact in the last
+def play_match(env_u, net_agent, net_enemy, max_steps=600, contact_window=10,
+               gui=False):
+    """Returns (winner, loser_exit) where winner in {A,B,draw,timeout,quit}
+    and loser_exit in {self_out, push, ""}. A loss with no contact in the last
     `contact_window` steps is a self-out; otherwise the opponent pushed."""
     stA, stB = fresh_state(), fresh_state()
     obsA = robot_obs(env_u, env_u.robot_id, stA, 0.0, 0.0, first=True)
     obsB = robot_obs(env_u, env_u.enemy_id, stB, 0.0, 0.0, first=True)
     last_contact = -10_000
     for step in range(max_steps):
+        if gui and not p.isConnected(env_u._client_id):
+            return "quit", ""
         rawA = DISCRETE_ACTION_MAP[net_agent.act_greedy(obsA)]
         rawB = DISCRETE_ACTION_MAP[net_enemy.act_greedy(obsB)]
         drive(env_u._left_wheel_idx, env_u._right_wheel_idx, env_u.robot_id, *rawA)
         drive(env_u._enemy_left_idx, env_u._enemy_right_idx, env_u.enemy_id, *rawB)
         for _ in range(SUBSTEPS_PER_STEP):
             p.stepSimulation()
+        if gui:
+            time.sleep(STEP_DT_SECONDS)   # pace to real time so it's watchable
         if p.getContactPoints(bodyA=env_u.robot_id, bodyB=env_u.enemy_id):
             last_contact = step
         za = p.getBasePositionAndOrientation(env_u.robot_id)[0][2]
@@ -154,6 +161,8 @@ def main():
     ap.add_argument("--b", required=True, help="policy B checkpoint")
     ap.add_argument("--n", type=int, default=60, help="matches")
     ap.add_argument("--seed", type=int, default=4242)
+    ap.add_argument("--gui", action="store_true",
+                    help="render the battle in a real-time PyBullet window")
     args = ap.parse_args()
 
     net_a = load_policy(args.a)
@@ -161,7 +170,7 @@ def main():
     # Deterministic, fair, validatable: disable per-step ToF noise for ALL
     # resets (reset() re-reads this module global each episode).
     sumo_env.DR_TOF_NOISE_SIGMA_PCT = 0.0
-    env = build_env(gui=False, seed=args.seed, narek_reward=False)
+    env = build_env(gui=args.gui, seed=args.seed, narek_reward=False)
     env_u = env.unwrapped
 
     # Faithfulness gate: swap-built agent obs must equal the env's native obs.
@@ -180,14 +189,22 @@ def main():
     res = Counter()
     a_selfout = b_selfout = 0
     for i in range(args.n):
+        if args.gui and not p.isConnected(env_u._client_id):
+            print("GUI window closed — stopping early.")
+            break
         env.reset(seed=args.seed + i)
         respawn_enemy_as_agent_robot(env_u)
-        winner, exit_kind = play_match(env_u, net_a, net_b)
+        winner, exit_kind = play_match(env_u, net_a, net_b, gui=args.gui)
+        if winner == "quit":
+            print("GUI window closed — stopping early.")
+            break
         res[winner] += 1
         if winner == "B" and exit_kind == "self_out":   # A drove itself off
             a_selfout += 1
         if winner == "A" and exit_kind == "self_out":   # B drove itself off
             b_selfout += 1
+        if args.gui:
+            print(f"  match {i+1}: {winner} wins ({exit_kind})", flush=True)
 
     env.close()
     a, b, d, t = res["A"], res["B"], res["draw"], res["timeout"]

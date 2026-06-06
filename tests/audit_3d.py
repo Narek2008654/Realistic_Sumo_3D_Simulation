@@ -72,7 +72,8 @@ from sumo_env import (
     AGENT_MAX_RAD, AGENT_MAX_FORCE, WHEEL_RADIUS,
     DOHYO_RADIUS, INNER_RADIUS, SPAWN_RADIUS, FALL_Z,
     STEP_DT_SECONDS, MAX_EPISODE_STEPS,
-    DISCRETE_ACTION_MAP,
+    DISCRETE_ACTION_MAP, OPENING_CHARGE_STEPS, SPAWN_GUARD_STEPS,
+    ANTISTALL_STEPS,
     REWARD_WIN, REWARD_LOSE_PUSH, REWARD_LOSE_MUTUAL, REWARD_LOSE_SELF,
     REWARD_TIMEOUT, REWARD_TIME,
     REWARD_ENGAGE_PER_TICK, REWARD_APPROACH, REWARD_WEDGE_PER_M,
@@ -991,6 +992,79 @@ p.resetBasePositionAndOrientation(_se2.robot_id, [0.31, 0, 0.04], qb)
 check("safety: rear-edge reflex -> drive inward",
       _se2._apply_safety_override(1.0, -1.0, clear) == (1.0, 1.0))
 _se2.close()
+
+# Hardcoded opening forward charge: the first OPENING_CHARGE_STEPS steps are
+# forced to (1, 1) regardless of the policy action (here discrete IDLE = 4).
+_oc = make_env(opening_charge=True)
+_oc.reset(seed=2)
+_oc.step(4)
+check("opening charge forces forward on step 1", _oc._prev_action == (1.0, 1.0))
+for _ in range(OPENING_CHARGE_STEPS - 1):
+    _oc.step(4)
+_oc.step(4)  # past the window -> the IDLE action passes through
+check("opening charge stops after the window", _oc._prev_action == (0.0, 0.0))
+_oc.close()
+
+# Standing-still penalty: fires on an idle/stationary agent, off when moving.
+_sp = make_env(still_penalty=True)
+_sp.reset(seed=3)
+_, _, _, _, _sp_info = _sp.step(4)  # IDLE -> agent does not move
+check("still penalty fires when the agent is stationary",
+      (_sp_info.get("reward_components_step") or {}).get("still", 0.0) < 0.0)
+_sp_info2 = None
+for _ in range(8):
+    _, _, _, _, _sp_info2 = _sp.step(8)  # (+1, +1) full forward
+check("still penalty off when moving forward",
+      "still" not in (_sp_info2.get("reward_components_step") or {}))
+_sp.close()
+
+# Backward penalty: fires on a net-reverse command, off when going forward.
+_bp = make_env(backward_penalty=True)
+_bp.reset(seed=5)
+_, _, _, _, _bp_info = _bp.step(0)   # (-1, -1) full reverse
+check("backward penalty fires on net-reverse command",
+      (_bp_info.get("reward_components_step") or {}).get("backward", 0.0) < 0.0)
+_, _, _, _, _bp_info2 = _bp.step(8)  # (+1, +1) forward
+check("backward penalty off when going forward",
+      "backward" not in (_bp_info2.get("reward_components_step") or {}))
+_bp.close()
+
+# Spawn guard: an early net-reverse command becomes forward; after the
+# window it passes through unchanged.
+_sg = make_env(spawn_guard=True)
+_sg.reset(seed=6)
+_sg.step(0)  # (-1, -1) reverse on step 0 -> forced forward
+check("spawn guard turns early reverse into forward",
+      _sg._prev_action == (1.0, 1.0))
+_sg._steps = SPAWN_GUARD_STEPS  # jump past the guard window
+_sg.step(0)  # (-1, -1) now passes through
+check("spawn guard lets reverse pass after the window",
+      _sg._prev_action == (-1.0, -1.0))
+_sg.close()
+
+# Anti-stall: ANTISTALL_STEPS consecutive idle commands force a forward charge.
+# dodger is evasive, so it won't end the episode while the agent sits idle.
+_as = make_env(antistall=True, force_opponent_id="dodger")
+_as.reset(seed=7)
+for _ in range(ANTISTALL_STEPS):
+    _as.step(4)  # discrete IDLE (0, 0)
+check("anti-stall forces forward after too many idle steps",
+      _as._prev_action == (1.0, 1.0))
+_as.close()
+
+# Per-episode power DR sets the opponent torque mult from its range.
+_md = make_env(mult_dr_range=(2.5, 2.5))
+_md.reset(seed=1)
+check("mult DR sets the per-episode torque mult",
+      abs(_md.novamax_torque_mult - 2.5) < 1e-9)
+_md.close()
+
+# enemy_as_agent spawns the opponent on the agent chassis and still runs.
+_ea = make_env(enemy_as_agent=True, force_opponent_id="davo")
+_ea.reset(seed=1)
+_ea.step(8)
+check("enemy_as_agent env steps without error", _ea.enemy_id is not None)
+_ea.close()
 
 
 # =============================================================================

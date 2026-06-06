@@ -106,6 +106,28 @@ assert abs(STEP_DT_SECONDS - 1.0 / TARGET_ACTION_HZ) < 2.0e-3, (
     f"target {1000.0 / TARGET_ACTION_HZ:.2f} ms ({TARGET_ACTION_HZ} Hz)"
 )
 
+# alg/improvment: hardcoded opening charge — drive straight forward for the
+# first OPENING_CHARGE_SECONDS of each match (the standard sumo opening; the
+# user's robot and the zoo openers do the same). Opt-in; mirrored 1:1 in
+# firmware. ~100 ms quantizes to 2 env steps (2 * 41.7 ms = 83 ms).
+OPENING_CHARGE_SECONDS = 0.100
+OPENING_CHARGE_STEPS = max(1, round(OPENING_CHARGE_SECONDS / STEP_DT_SECONDS))
+
+# alg/improvment: spawn guard — for the first SPAWN_GUARD_SECONDS of a match,
+# if the policy commands net-backward, drive forward instead (otherwise leave
+# the action alone). The robot spawns close to the rear rim, and a self-out
+# timing study found ~⅓ of self-outs happen in the first ~1 s from backing
+# into the edge; after that, reversing can be legitimate. Mirrored in firmware.
+SPAWN_GUARD_SECONDS = 1.0
+SPAWN_GUARD_STEPS = max(1, round(SPAWN_GUARD_SECONDS / STEP_DT_SECONDS))
+
+# alg/improvment: anti-stall override — if the policy commands (near-)idle for
+# ANTISTALL_STEPS in a row, force a forward charge instead. A hard backstop on
+# top of the soft still-penalty, so the bot never freezes mid-match. Mirrored
+# in firmware. ~1 s of standing still = too long.
+ANTISTALL_SECONDS = 1.0
+ANTISTALL_STEPS = max(1, round(ANTISTALL_SECONDS / STEP_DT_SECONDS))
+
 # Initial agent-only forward charge at episode start (500 ms). The red
 # robot drives both wheels full forward; the enemy stays still until
 # the policy takes over.
@@ -263,6 +285,13 @@ REWARD_LOSE_SELF   = -50.0    # walked off without recent contact (HEAVY).
                               # (the forward edge is unobservable) — reverted
                               # to the proven -50 to avoid timid play.
 REWARD_TIMEOUT     = -10.0
+# alg/improvment: per-step penalty for standing still (barely moving while not
+# in contact) — discourages freezing, timeout-stalling, and in-place spinning.
+REWARD_STILL_PENALTY = -0.05
+STILL_SPEED_THRESHOLD = 0.05   # m/s linear speed below this counts as "still"
+# alg/improvment: slight per-step penalty for going backward (net-reverse
+# command) — discourages retreating. Smaller than the still penalty.
+REWARD_BACKWARD_PENALTY = -0.02
 
 # Bearing-based tracking reward (Run 14 / 2D port). Fires only when the
 # opponent is within REWARD_TRACK_RANGE (close enough that orientation
@@ -552,6 +581,14 @@ class MiniSumoEnv(gym.Env):
         flank_reward: bool = False,
         edge_avoid_reward: bool = False,
         safety_override: bool = False,
+        opening_charge: bool = False,
+        spawn_guard: bool = False,
+        antistall: bool = False,
+        still_penalty: bool = False,
+        backward_penalty: bool = False,
+        enemy_as_agent: bool = False,
+        enemy_chassis_dr: bool = False,
+        mult_dr_range: Optional[tuple] = None,
         opponent_dr: bool = False,
         sensor_hard_dr: bool = False,
         opponent_weights: Optional[dict] = None,
@@ -563,6 +600,21 @@ class MiniSumoEnv(gym.Env):
         # alg/improvment: hardcoded observable safety override (anti-blind-
         # charge + rear-edge reflex), applied to the action before motors.
         self.safety_override = bool(safety_override)
+        # alg/improvment: hardcoded opening forward charge (first ~100 ms).
+        self.opening_charge = bool(opening_charge)
+        # alg/improvment: spawn guard — early net-backward -> forward.
+        self.spawn_guard = bool(spawn_guard)
+        # alg/improvment: anti-stall — too many idle commands -> forward.
+        self.antistall = bool(antistall)
+        # alg/improvment: spawn the opponent on the agent chassis (robot.urdf).
+        self.enemy_as_agent = bool(enemy_as_agent)
+        # alg/improvment: per-episode opponent hardware/power randomization.
+        self.enemy_chassis_dr = bool(enemy_chassis_dr)
+        self.mult_dr_range = mult_dr_range
+        # alg/improvment: per-step penalty for standing still (see step()).
+        self.still_penalty = bool(still_penalty)
+        # alg/improvment: slight per-step penalty for going backward.
+        self.backward_penalty = bool(backward_penalty)
         # alg/improvment: optional per-episode opponent sampling weights
         # (e.g. a novamax-heavy mix for a targeted finetune). None = the
         # zoo default. Ignored when force_opponent_id pins one opponent.
@@ -1440,8 +1492,21 @@ class MiniSumoEnv(gym.Env):
             self.robot_id, -1, mass=ROBOT_MASS_NOMINAL * agent_mass_mult,
         )
 
+        # alg/improvment: per-episode power randomization (different torque
+        # mults) so the agent faces a range of opponent strengths.
+        if self.mult_dr_range is not None:
+            self.novamax_torque_mult = float(
+                self._np_random.uniform(*self.mult_dr_range))
+
+        # alg/improvment: enemy chassis. enemy_as_agent forces the AGENT
+        # chassis (robot.urdf); enemy_chassis_dr randomizes it 50/50 per
+        # episode, so the agent meets opponents on different hardware (and
+        # learns the equal-power dynamics, not just the novamax chassis).
+        use_agent_chassis = self.enemy_as_agent or (
+            self.enemy_chassis_dr and self._np_random.random() < 0.5)
+        enemy_urdf = ROBOT_URDF if use_agent_chassis else NOVAMAX_URDF
         self.enemy_id, enemy_joints = self._spawn_robot(
-            enemy_pos, enemy_yaw, ENEMY_RGBA, urdf_path=NOVAMAX_URDF,
+            enemy_pos, enemy_yaw, ENEMY_RGBA, urdf_path=enemy_urdf,
         )
         self._enemy_left_idx = enemy_joints["left_wheel_joint"]
         self._enemy_right_idx = enemy_joints["right_wheel_joint"]
@@ -1478,6 +1543,8 @@ class MiniSumoEnv(gym.Env):
         self._wedge_engaged_ticks = 0
         self._wedge_being_wedged_ticks = 0
         self._flank_paid = 0.0
+        self._opening_charge_left = OPENING_CHARGE_STEPS if self.opening_charge else 0
+        self._idle_streak = 0
         self._steps = 0
         # Step 6: tracks the env-step at which the last agent↔enemy
         # contact was observed. Used to distinguish push-loss from
@@ -1574,6 +1641,33 @@ class MiniSumoEnv(gym.Env):
             raw_left, raw_right = self._apply_safety_override(
                 raw_left, raw_right, self._raw_distances(),
             )
+
+        # alg/improvment: hardcoded opening charge — force straight forward
+        # for the first ~100 ms of the match (deterministic, mirrored in
+        # firmware). Applied last so it overrides policy + safety at the start.
+        if self._opening_charge_left > 0:
+            raw_left, raw_right = 1.0, 1.0
+            self._opening_charge_left -= 1
+
+        # alg/improvment: spawn guard — early in the match, a net-backward
+        # command drives the robot into the rear rim (it spawns near it), so
+        # go forward instead; later, reversing is left alone. Mirrored in
+        # firmware. self._steps is 0-indexed at the top of step().
+        if (self.spawn_guard and self._steps < SPAWN_GUARD_STEPS
+                and (raw_left + raw_right) < 0.0):
+            raw_left, raw_right = 1.0, 1.0
+
+        # alg/improvment: anti-stall — if the policy keeps commanding (near-)
+        # idle, force a forward charge so it never freezes mid-match. Mirrored
+        # in firmware.
+        if self.antistall:
+            if abs(raw_left) < 0.5 and abs(raw_right) < 0.5:
+                self._idle_streak += 1
+            else:
+                self._idle_streak = 0
+            if self._idle_streak >= ANTISTALL_STEPS:
+                raw_left, raw_right = 1.0, 1.0
+                self._idle_streak = 0
 
         # Domain randomization (Step 4): action latency → dead zone.
         # The new action enters the FIFO; the action that left the FIFO
@@ -1702,6 +1796,22 @@ class MiniSumoEnv(gym.Env):
                 components["engage"] = REWARD_ENGAGE_PER_TICK
             else:
                 self._engagement_timer = 0
+
+            # alg/improvment: standing-still penalty. Punish barely moving
+            # while NOT in contact (so genuine push stalemates are exempt —
+            # the stuck-detector handles those). Discourages freezing,
+            # timeout-stalling, and useless in-place spinning (low linear
+            # speed). Opt-in so future finetunes can include it.
+            if self.still_penalty and not contacts:
+                a_lv, _ = p.getBaseVelocity(self.robot_id)
+                if math.hypot(a_lv[0], a_lv[1]) < STILL_SPEED_THRESHOLD:
+                    components["still"] = REWARD_STILL_PENALTY
+
+            # alg/improvment: slight penalty for a net-backward (reverse)
+            # command — discourages retreating. Uses the executed action so
+            # the opening charge / safety override are correctly exempt.
+            if self.backward_penalty and (raw_left + raw_right) < 0.0:
+                components["backward"] = REWARD_BACKWARD_PENALTY
 
             # Run 11: Narek-style action-conditioned reward shaping.
             # Mirrors github.com/Narek2008654/Simulator/data_reader.py.

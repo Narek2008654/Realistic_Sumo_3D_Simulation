@@ -14,6 +14,7 @@ from typing import Callable
 import numpy as np
 
 from .charger import Charger
+from .davo import Davo
 from .dodger import Dodger
 from .feinter import Feinter
 from .orbiter import Orbiter
@@ -37,6 +38,7 @@ OPPONENT_REGISTRY: dict[str, Callable[[], object]] = {
     "spinner": Spinner,
     "wedger":  Wedger,
     "charger": Charger,
+    "davo":    Davo,
     # alg/improvment: held-out opponents — never sampled for training
     # (weight 0), only pinned via force_opponent_id for zero-shot eval.
     "feinter": Feinter,
@@ -57,11 +59,12 @@ HELD_OUT_OPPONENT_IDS: tuple[str, ...] = ("feinter", "orbiter")
 # the standard zoo sampling distribution stays unchanged; charger is
 # only used when explicitly pinned via force_opponent_id.
 OPPONENT_WEIGHTS: dict[str, float] = {
-    "novamax": 0.30,
-    "rammer":  0.20,
-    "wedger":  0.20,
-    "dodger":  0.15,
-    "spinner": 0.15,
+    "novamax": 0.25,
+    "rammer":  0.18,
+    "wedger":  0.17,
+    "dodger":  0.13,
+    "spinner": 0.12,
+    "davo":    0.15,   # alg/improvment: user's scripted tracker, now trained against
     "charger": 0.0,
     # Held out from training (zero-shot eval only).
     "feinter": 0.0,

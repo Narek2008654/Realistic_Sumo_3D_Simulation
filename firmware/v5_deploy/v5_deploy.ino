@@ -1,11 +1,13 @@
-// v5_deploy.ino — Mini Sumo Arduino Nano, runs ppo_ent0_best.pt
-// (the 21-D discrete-PPO champion: BC warm start + curriculum + zero-entropy
-// sharpening, trained on the realistic 3D PyBullet sim, branch pol/ppo).
-// Beats Stage-A head-to-head 65% with ~3x fewer self-outs and far better
-// generalization (83% held-out); meets the 65%-overall / 55%-novamax bar.
-// The PPO actor head argmax = the action, so it uses the same discrete
-// export path as the DQN. NOTE: trained WITH the hardcoded safety override,
-// which is replicated in loop() below.
+// v5_deploy.ino — Mini Sumo Arduino Nano, runs ppo_robust_best.pt
+// (the 21-D discrete-PPO model: BC warm start + curriculum + zero-entropy
+// sharpening + a finetune on tracking/still/backward rewards, the Davo
+// opponent, and per-episode domain randomization of opponent power / speed /
+// hardware. Branch pol/ppo). At mult 3.0: ~73% seen, 70% novamax, 87% vs
+// Davo, 78% held-out, meeting the 65%-overall / 55%-novamax bar with the
+// lowest self-out rate of any model. The PPO actor head argmax = the action,
+// so it uses the same discrete export path as the DQN. NOTE: trained WITH the
+// hardcoded action overrides (safety, opening charge, spawn guard,
+// anti-stall), all replicated in loop() below.
 //
 // DIFFERENCE FROM v3: the policy now consumes a 21-D observation = the 3
 // VL53L0X distance channels STACKED over the last K=4 frames (oldest
@@ -157,6 +159,23 @@ mini_sumo_obs::EngagementTimerState engagement_timer;
 mini_sumo_obs::YawRateProxyState    yaw_rate_proxy;
 mini_sumo_obs::IrDeltaState         ir_delta_state;
 
+// Hardcoded opening charge: force straight forward for the first
+// OPENING_CHARGE_STEPS loops of the match (mirrors sumo_env opening_charge,
+// ~100 ms). Counts down once per loop; one match per power-on.
+constexpr uint8_t OPENING_CHARGE_STEPS = 2;
+uint8_t opening_charge_left = OPENING_CHARGE_STEPS;
+
+// Spawn guard: for the first SPAWN_GUARD_STEPS loops, a net-backward command
+// becomes forward (the robot spawns near the rear rim; ~1/3 of self-outs are
+// from backing into it early). Mirrors sumo_env spawn_guard. ~1 s @ ~24 Hz.
+constexpr uint8_t SPAWN_GUARD_STEPS = 24;
+uint8_t spawn_guard_left = SPAWN_GUARD_STEPS;
+
+// Anti-stall: if the policy commands (near-)idle for ANTISTALL_STEPS in a
+// row, force a forward charge so the bot never freezes (mirrors sumo_env).
+constexpr uint8_t ANTISTALL_STEPS = 24;
+uint8_t idle_streak = 0;
+
 // =====================================================================
 // Setup
 // =====================================================================
@@ -220,7 +239,7 @@ void setup() {
     ring_init = false;
     last_valid_sensor_ms = millis();
 
-    Serial.println(F("ready (v5, 21-D PPO champion + safety override)"));
+    Serial.println(F("ready (v5, 21-D PPO robust + guards)"));
 }
 
 // =====================================================================
@@ -289,6 +308,36 @@ void loop() {
                    out_l > 0.5f && out_r > 0.5f) {
             out_l = 1.0f; out_r = -1.0f;
         }
+    }
+
+    // Hardcoded opening charge — force straight forward for the first few
+    // loops (mirrors sumo_env.opening_charge). All obs state was already
+    // updated above, so the policy's first real decision sees training-like
+    // context; prev_action below latches the executed (forward) command.
+    if (opening_charge_left > 0) {
+        out_l = 1.0f; out_r = 1.0f;
+        opening_charge_left--;
+    }
+
+    // Spawn guard — early net-backward command becomes forward (mirrors
+    // sumo_env spawn_guard). Counts down once per loop regardless.
+    if (spawn_guard_left > 0) {
+        spawn_guard_left--;
+        if (out_l + out_r < 0.0f) {
+            out_l = 1.0f; out_r = 1.0f;
+        }
+    }
+
+    // Anti-stall — too many (near-)idle commands in a row -> forward charge
+    // (mirrors sumo_env antistall).
+    if (out_l > -0.5f && out_l < 0.5f && out_r > -0.5f && out_r < 0.5f) {
+        if (idle_streak < 255) idle_streak++;
+    } else {
+        idle_streak = 0;
+    }
+    if (idle_streak >= ANTISTALL_STEPS) {
+        out_l = 1.0f; out_r = 1.0f;
+        idle_streak = 0;
     }
 
     // prev_action / yaw proxy track the action actually executed (both

@@ -102,16 +102,25 @@ if SMOKE:
 # plateau by letting the policy fully exploit. New output paths so the
 # original run's checkpoints are preserved.
 RESUME = os.environ.get("PPO_RESUME")
+# Robustness mode (PPO_ROBUST=1): per-episode domain randomization of opponent
+# POWER (torque mult), SPEED/intelligence (opponent DR), and HARDWARE (chassis)
+# on top of the full controller zoo — so the agent learns to fight diverse,
+# unseen robots (incl. same-chassis chargers like Davo). New output paths.
+ROBUST = bool(os.environ.get("PPO_ROBUST"))
+ROBUST_MULT_RANGE = (1.0, 3.0)
 if RESUME:
     TOTAL_STEPS = 300_000
     MULT_PHASES = ((3.0, 300_000),)
-    CRITIC_WARMUP_UPDATES = 0     # resumed critic is already trained
+    CRITIC_WARMUP_UPDATES = 4     # re-warm: the reward/opponent mix changed
     BEST_PATH = CHECKPOINTS / "ppo_resume_best.pt"
     FINAL_PATH = CHECKPOINTS / "ppo_resume_final.pt"
     if os.environ.get("PPO_ENT0"):
         ENT_COEF = 0.0
         BEST_PATH = CHECKPOINTS / "ppo_ent0_best.pt"
         FINAL_PATH = CHECKPOINTS / "ppo_ent0_final.pt"
+    if ROBUST:
+        BEST_PATH = CHECKPOINTS / "ppo_robust_best.pt"
+        FINAL_PATH = CHECKPOINTS / "ppo_robust_final.pt"
 
 
 # ---------------------------------------------------------------------------
@@ -233,11 +242,19 @@ def train():
     np.random.seed(SEED)
     torch.manual_seed(SEED)
 
+    # alg/improvment: tracking reward instead of flank (mutually exclusive in
+    # the env). The flank-trained champion span/circled erratically; tracking
+    # rewards keeping the opponent in the front cone, which steadies pursuit.
     env = build_env(
         gui=False, seed=SEED,
         novamax_torque_mult=MULT_PHASES[0][0], force_opponent_id=None,
         narek_reward=True, action_consistency_reward=True,
-        flank_reward=True, safety_override=True,
+        tracking_reward=True, flank_reward=False, safety_override=True,
+        opening_charge=True, spawn_guard=True, antistall=True,
+        still_penalty=True, backward_penalty=True,
+        # robustness DR: diverse opponent power / speed / hardware
+        opponent_dr=ROBUST, enemy_chassis_dr=ROBUST,
+        mult_dr_range=ROBUST_MULT_RANGE if ROBUST else None,
     )
 
     net = ActorCritic(NET_OBS_DIM, N_ACTIONS, hidden=NET_ARCH)

@@ -32,16 +32,18 @@ from opponents import HELD_OUT_OPPONENT_IDS
 # Trained-against ("seen") zoo vs the held-out opponents used to measure
 # zero-shot generalization. Eval runs with a clean env (no opponent/hard
 # sensor DR) so win-rates are reproducible and comparable to the baseline.
-SEEN_OPPONENTS = ("dodger", "spinner", "rammer", "wedger", "novamax", "charger")
+SEEN_OPPONENTS = ("dodger", "spinner", "rammer", "wedger", "novamax", "charger", "davo")
 HELD_OUT = HELD_OUT_OPPONENT_IDS
 
 
 def run_eval(model: DuelingQNet, opp: str, mult: float, n: int, seed: int,
-             safety: bool = False):
+             safety: bool = False, spawn_guard: bool = False,
+             same_chassis: bool = False):
     env = build_env(
         gui=False, seed=seed,
         novamax_torque_mult=mult, force_opponent_id=opp,
-        narek_reward=False, safety_override=safety,
+        narek_reward=False, safety_override=safety, spawn_guard=spawn_guard,
+        enemy_as_agent=same_chassis,
     )
     reasons: Counter = Counter()
     ep_lens = []
@@ -81,6 +83,10 @@ def main():
     )
     ap.add_argument("--safety", action="store_true",
                     help="apply the hardcoded safety override at eval")
+    ap.add_argument("--spawn-guard", action="store_true",
+                    help="apply the spawn guard (early backward -> forward)")
+    ap.add_argument("--same-chassis", action="store_true",
+                    help="spawn the opponent on the agent chassis (robot.urdf)")
     args = ap.parse_args()
 
     ckpt_path = Path(args.ckpt)
@@ -109,7 +115,8 @@ def main():
         print(f"--- {label} " + "-" * (35 - len(label)))
         group_wins = group_n = group_self = 0
         for opp in opps:
-            r = run_eval(model, opp, args.mult, args.n_eps, args.seed, args.safety)
+            r = run_eval(model, opp, args.mult, args.n_eps, args.seed,
+                         args.safety, args.spawn_guard, args.same_chassis)
             print(
                 f"{opp:10s}  {r['wr']:>5.0%}  "
                 f"{r['wins']:>2d}/{r['losses']:>2d}/{r['timeouts']:>2d}  "
