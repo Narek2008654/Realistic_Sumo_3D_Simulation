@@ -127,7 +127,13 @@ def play_match(env_u, net_agent, net_enemy, max_steps=600, contact_window=10,
                gui=False):
     """Returns (winner, loser_exit) where winner in {A,B,draw,timeout,quit}
     and loser_exit in {self_out, push, ""}. A loss with no contact in the last
-    `contact_window` steps is a self-out; otherwise the opponent pushed."""
+    `contact_window` steps is a self-out; otherwise the opponent pushed.
+
+    NOTE: the hardcoded guards (safety_override, opening_charge, spawn_guard,
+    antistall) are NOT applied here — this drives raw greedy actions. Relative
+    A-vs-B win-rate is still valid (both sides lack guards), but the reported
+    self-out rates run higher than on real hardware, which has the guards.
+    """
     stA, stB = fresh_state(), fresh_state()
     obsA = robot_obs(env_u, env_u.robot_id, stA, 0.0, 0.0, first=True)
     obsB = robot_obs(env_u, env_u.enemy_id, stB, 0.0, 0.0, first=True)

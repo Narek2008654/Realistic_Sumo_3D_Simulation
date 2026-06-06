@@ -361,11 +361,13 @@ def train():
                 _, ent, _ = net.evaluate(obs_t[:MINIBATCH], act_t[:MINIBATCH])
                 last_entropy = float(ent.mean())
         else:
-            # Full PPO with a per-update KL early-stop so one rollout cannot
-            # take a destructive step.
+            # Full PPO with a per-MINIBATCH KL early-stop: break the instant KL
+            # exceeds the budget, not at end-of-epoch, so one rollout cannot
+            # take a destructive step (an early bad minibatch otherwise lets the
+            # rest of the epoch keep updating).
+            kl_stop = False
             for _ in range(EPOCHS):
                 perm = np.random.permutation(n)
-                approx_kl = 0.0
                 for s in range(0, n, MINIBATCH):
                     mb = perm[s:s + MINIBATCH]
                     new_logp, entropy, value = net.evaluate(obs_t[mb], act_t[mb])
@@ -387,7 +389,10 @@ def train():
                         # can make it slightly negative, which would defeat the
                         # early-stop comparison against TARGET_KL.
                         approx_kl = float(((ratio - 1) - logratio).mean().abs())
-                if approx_kl > TARGET_KL:
+                    if approx_kl > TARGET_KL:
+                        kl_stop = True
+                        break
+                if kl_stop:
                     break
             last_kl = approx_kl
         update_idx += 1
