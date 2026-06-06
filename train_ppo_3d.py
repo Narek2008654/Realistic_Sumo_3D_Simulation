@@ -96,6 +96,23 @@ if SMOKE:
     CRITIC_WARMUP_UPDATES = 2
     WATCH_EVERY = 10**9            # no GUI pop-ups during smoke tests
 
+# Resume mode: continue a trained policy at fixed mult 3.0 (it is already
+# ramped, and its critic is warm). Set PPO_RESUME=<ckpt>. With PPO_ENT0=1 the
+# entropy bonus is removed, testing whether exploration was capping the
+# plateau by letting the policy fully exploit. New output paths so the
+# original run's checkpoints are preserved.
+RESUME = os.environ.get("PPO_RESUME")
+if RESUME:
+    TOTAL_STEPS = 300_000
+    MULT_PHASES = ((3.0, 300_000),)
+    CRITIC_WARMUP_UPDATES = 0     # resumed critic is already trained
+    BEST_PATH = CHECKPOINTS / "ppo_resume_best.pt"
+    FINAL_PATH = CHECKPOINTS / "ppo_resume_final.pt"
+    if os.environ.get("PPO_ENT0"):
+        ENT_COEF = 0.0
+        BEST_PATH = CHECKPOINTS / "ppo_ent0_best.pt"
+        FINAL_PATH = CHECKPOINTS / "ppo_ent0_final.pt"
+
 
 # ---------------------------------------------------------------------------
 # Actor-critic (export-compatible with DuelingQNet tooling)
@@ -225,8 +242,14 @@ def train():
 
     net = ActorCritic(NET_OBS_DIM, N_ACTIONS, hidden=NET_ARCH)
 
-    # Actor-only BC warm start from the cached winner demos (21-D).
-    if BC_DATASET_PATH.exists():
+    if RESUME:
+        # Continue a trained policy (skip BC; both heads are already trained).
+        net.load_state_dict(torch.load(RESUME, map_location="cpu",
+                                       weights_only=True))
+        print(f"resumed from {RESUME} "
+              f"(ENT_COEF={ENT_COEF}, fixed mult 3.0)", flush=True)
+    elif BC_DATASET_PATH.exists():
+        # Actor-only BC warm start from the cached winner demos (21-D).
         cached = np.load(BC_DATASET_PATH)
         if cached["obs"].shape[1] == NET_OBS_DIM:
             print(f"BC warm start from {BC_DATASET_PATH.name} "
