@@ -30,11 +30,11 @@ import time
 from pathlib import Path
 
 import torch  # noqa: F401  # import first to avoid Windows fbgemm.dll race
-import numpy as np
 import pybullet as p
 
-from sumo_env import MiniSumoEnv
-from train_dqn_3d import DuelingQNet, OBS_DIM, N_ACTIONS, NET_ARCH, BEST_PATH
+from train_dqn_3d import (
+    DuelingQNet, BEST_PATH, build_env,
+)
 
 
 def main():
@@ -52,18 +52,22 @@ def main():
     if not ckpt_path.exists():
         sys.exit(f"checkpoint not found: {ckpt_path}")
 
-    model = DuelingQNet(OBS_DIM, N_ACTIONS, hidden=NET_ARCH)
+    # Infer architecture from the checkpoint so any net (32x32, 48x48, ...)
+    # loads regardless of the trainer's current NET_ARCH.
     state = torch.load(str(ckpt_path), map_location="cpu", weights_only=True)
+    h1, obs_dim = state["trunk.0.weight"].shape
+    h2 = state["trunk.2.weight"].shape[0]
+    n_act = state["advantage_head.weight"].shape[0]
+    model = DuelingQNet(obs_dim, n_act, hidden=(h1, h2))
     model.load_state_dict(state)
     model.eval()
-    print(f"Loaded {ckpt_path.name}")
+    print(f"Loaded {ckpt_path.name}  (obs={obs_dim}, arch=({h1},{h2}))")
     print(f"Opening PyBullet GUI: opp={args.opp or 'zoo'} mult={args.mult}\n")
 
-    env = MiniSumoEnv(
+    env = build_env(
         gui=True, seed=int(time.time()),
         novamax_torque_mult=args.mult,
         force_opponent_id=args.opp,
-        action_space_kind="discrete",
         narek_reward=False,
     )
     # Suppress PyBullet's built-in keyboard shortcuts (W/G/etc) and
@@ -81,10 +85,13 @@ def main():
         while True:
             if args.n_episodes and ep >= args.n_episodes:
                 break
+            if not p.isConnected(env.unwrapped._client_id):
+                print("GUI window closed — exiting.")
+                break
             obs, _ = env.reset()
             terminated = truncated = False
             while not (terminated or truncated):
-                if not p.isConnected(env._client_id):
+                if not p.isConnected(env.unwrapped._client_id):
                     print("GUI window closed — exiting.")
                     return
                 # Quit on Q held inside the window

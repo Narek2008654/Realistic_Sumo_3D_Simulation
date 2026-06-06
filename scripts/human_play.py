@@ -51,6 +51,7 @@ import numpy as np
 import pybullet as p
 
 from sumo_env import MiniSumoEnv, DISCRETE_ACTION_MAP
+from obs_stack import RawDistanceStack, DEFAULT_STACK_K
 
 
 # ---------------------------------------------------------------------------
@@ -168,12 +169,17 @@ def main() -> None:
     here = Path(__file__).parent
     out_path = here / args.out
 
-    env = MiniSumoEnv(
-        gui=True, seed=int(time.time()),
-        novamax_torque_mult=args.mult,
-        force_opponent_id=args.opp,
-        action_space_kind="discrete",
-        narek_reward=True,
+    # Wrapped in the K-frame raw-distance stack so recorded obs are 21-D,
+    # matching the policy network / BC dataset layout.
+    env = RawDistanceStack(
+        MiniSumoEnv(
+            gui=True, seed=int(time.time()),
+            novamax_torque_mult=args.mult,
+            force_opponent_id=args.opp,
+            action_space_kind="discrete",
+            narek_reward=True,
+        ),
+        k=DEFAULT_STACK_K,
     )
 
     # Disable PyBullet's built-in keyboard shortcuts (W = wireframe,

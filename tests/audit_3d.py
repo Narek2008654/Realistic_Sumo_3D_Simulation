@@ -1,6 +1,6 @@
 """Comprehensive correctness audit for the 3D mini-sumo env.
 
-Runs 49 self-contained tests across categories A-O and prints PASS/FAIL
+Runs 67 self-contained tests across categories A-S and prints PASS/FAIL
 for each. Categories:
 
   A. Constants sanity (mass / speed / dimensions match spec)
@@ -18,6 +18,10 @@ for each. Categories:
   M. Reward components
   N. yaw_rate_proxy
   O. IR sensor noise + dropout DR
+  P. Flank reward (rear/side engagement, gating, episode cap)
+  Q. Frame stacking (RawDistanceStack + offline windowing)
+  R. Behavioral opponent DR + hard sensor-noise DR
+  S. Held-out opponent zoo (feinter / orbiter)
 
 Run:
     python tests/audit_3d.py
@@ -79,6 +83,15 @@ from sumo_env import (
     DR_MASS_RANGE, DR_FRICTION_RANGE, DR_VELOCITY_RANGE,
     DR_DEADZONE_RANGE, DR_ACTION_LATENCY_CHOICES,
     SIM_TIMESTEP,
+    FLANK_EPISODE_CAP,
+    DR_TOF_NOISE_SIGMA_PCT, DR_TOF_NOISE_SIGMA_PCT_HARD,
+    OPP_DR_SPEED_RANGE, OPP_DR_TRACKING_RANGE, OPP_DR_REACTION_CHOICES,
+)
+from obs_stack import (
+    RawDistanceStack, stack_from_trajectory, stacked_dim, DEFAULT_STACK_K,
+)
+from opponents import (
+    OPPONENT_REGISTRY, OPPONENT_WEIGHTS, HELD_OUT_OPPONENT_IDS,
 )
 
 
@@ -838,6 +851,270 @@ def test_ir_noise():
 std, mean = test_ir_noise()
 check("IR sensor noise produces sample variance",
       std > 0.001, f"std={std:.4f} mean={mean:.3f} over 50 samples")
+
+
+# =============================================================================
+# P. Flank reward (alg/improvment)
+# =============================================================================
+section("P. Flank reward")
+
+def stage_rear_push(env, facing_out: bool):
+    """Pin the enemy near the +x edge and the agent just behind it on the
+    center side, both facing +x. With the enemy facing OUTWARD the agent
+    is behind it and a forward push drives enemy_r up (flank should fire);
+    facing the agent (inward) makes the same push a frontal contact."""
+    env._apply_enemy_control = lambda: None  # freeze enemy
+    qa = p.getQuaternionFromEuler([0, 0, 0.0])               # agent faces +x
+    qe = p.getQuaternionFromEuler([0, 0, 0.0 if facing_out else math.pi])
+    p.resetBasePositionAndOrientation(env.robot_id, [0.16, 0, 0.04], qa)
+    p.resetBasePositionAndOrientation(env.enemy_id, [0.25, 0, 0.04], qe)
+    p.resetBaseVelocity(env.robot_id, [0, 0, 0], [0, 0, 0])
+    p.resetBaseVelocity(env.enemy_id, [0, 0, 0], [0, 0, 0])
+
+def flank_rollout(facing_out, flank_on, n=40):
+    env = make_env(flank_reward=flank_on)
+    env.reset(seed=31)
+    stage_rear_push(env, facing_out)
+    idx_fwd = next(i for i, a in enumerate(DISCRETE_ACTION_MAP) if a == (1.0, 1.0))
+    saw = set()
+    for _ in range(n):
+        _, _, term, trunc, info = env.step(idx_fwd)
+        saw.update((info.get("reward_components_step") or {}).keys())
+        if term or trunc:
+            break
+    paid = env._flank_paid
+    env.close()
+    return saw, paid
+
+saw_rear, paid_rear = flank_rollout(facing_out=True, flank_on=True)
+check("flank fires when pushing the enemy out from behind",
+      "flank" in saw_rear and paid_rear > 0.0, f"flank_paid={paid_rear:.3f}")
+
+saw_front, _ = flank_rollout(facing_out=False, flank_on=True)
+check("flank does NOT fire on a frontal push",
+      "flank" not in saw_front, f"saw {sorted(saw_front)}")
+
+saw_off, paid_off = flank_rollout(facing_out=True, flank_on=False)
+check("flank silent when flank_reward=False",
+      "flank" not in saw_off and paid_off == 0.0, f"saw {sorted(saw_off)}")
+
+check("flank reward never exceeds the per-episode cap",
+      paid_rear <= FLANK_EPISODE_CAP + 1e-9,
+      f"flank_paid={paid_rear:.3f} <= cap={FLANK_EPISODE_CAP}")
+
+# Cap clamp: with the budget already spent, a paying step adds nothing.
+def flank_cap_clamp():
+    env = make_env(flank_reward=True)
+    env.reset(seed=32)
+    stage_rear_push(env, facing_out=True)
+    idx_fwd = next(i for i, a in enumerate(DISCRETE_ACTION_MAP) if a == (1.0, 1.0))
+    for _ in range(6):                       # establish contact + a push reference
+        env.step(idx_fwd)
+    env._flank_paid = FLANK_EPISODE_CAP      # exhaust the budget
+    _, _, _, _, info = env.step(idx_fwd)
+    comps = info.get("reward_components_step") or {}
+    env.close()
+    return comps.get("flank", 0.0)
+flank_after_cap = flank_cap_clamp()
+check("flank pays nothing once the episode cap is reached",
+      flank_after_cap == 0.0, f"flank={flank_after_cap}")
+
+env_fl = make_env(flank_reward=True, tracking_reward=True)
+check("flank_reward forces the conflicting tracking_reward off",
+      env_fl.flank_reward and not env_fl.tracking_reward)
+env_fl.close()
+
+# Observable-proxy edge avoidance: penalize a blind forward charge (no
+# target in the cone) and the rear line sensors over the border. Helper
+# stages the agent at (px,py) facing +x (yaw 0) with the enemy at enemy_xy
+# and runs one step of `action`; returns the named edge components.
+def edge_components(px, py, action, enemy_xy=(10.0, 10.0), yaw=0.0):
+    env = make_env(edge_avoid_reward=True)
+    env.reset(seed=40)
+    env._apply_enemy_control = lambda: None
+    qa = p.getQuaternionFromEuler([0, 0, yaw])
+    p.resetBasePositionAndOrientation(env.robot_id, [px, py, 0.04], qa)
+    p.resetBasePositionAndOrientation(
+        env.enemy_id, [enemy_xy[0], enemy_xy[1], 0.04],
+        p.getQuaternionFromEuler([0, 0, 0]))
+    idx = next(i for i, a in enumerate(DISCRETE_ACTION_MAP) if a == action)
+    _, _, _, _, info = env.step(idx)
+    env.close()
+    return info.get("reward_components_step") or {}
+
+FWD = (1.0, 1.0)
+IDLE = (0.0, 0.0)
+# Center, driving forward, nothing detected -> blind-charge penalty.
+check("blind-charge penalty fires (forward + no target)",
+      edge_components(0.0, 0.0, FWD).get("blindcharge", 0.0) < 0.0)
+# Same but idle -> no blind-charge (not driving forward).
+check("blind-charge silent when not driving forward",
+      "blindcharge" not in edge_components(0.0, 0.0, IDLE))
+# Opponent detected close ahead -> no blind-charge (target in the cone).
+check("blind-charge silent when a target is detected",
+      "blindcharge" not in edge_components(0.0, 0.0, FWD, enemy_xy=(0.30, 0.0)))
+# Agent backed toward the +x rim (facing -x so its rear is over the border)
+# -> rear-edge penalty.
+check("rear-edge penalty fires when a rear line sensor is over the border",
+      edge_components(0.31, 0.0, IDLE, yaw=math.pi).get("rearedge", 0.0) < 0.0)
+
+def edge_off_default():
+    env = make_env()  # edge_avoid_reward defaults False
+    env.reset(seed=1)
+    _, _, _, _, info = env.step(0)
+    env.close()
+    comps = info.get("reward_components_step") or {}
+    return "blindcharge" in comps or "rearedge" in comps
+check("edge proxy reward off by default", not edge_off_default())
+
+# Hardcoded safety override (observable, deployable).
+def safety_env():
+    env = make_env(safety_override=True)
+    env.reset(seed=44)
+    env.last_seen_dir = 0.0
+    return env
+
+clear = [None, None, None]   # no hit -> all distances clear
+# Anti-blind-charge: forward + nothing detected + last_seen lost -> scan-spin.
+_se = safety_env()
+check("safety: blind forward charge -> scan-spin",
+      _se._apply_safety_override(1.0, 1.0, clear) == (1.0, -1.0))
+# Target detected ahead -> pass the forward command through.
+check("safety: forward passes when a target is detected",
+      _se._apply_safety_override(1.0, 1.0, [0.1, None, None]) == (1.0, 1.0))
+_se.close()
+# Rear line sensor over the border -> drive inward to recover (priority).
+_se2 = make_env(safety_override=True)
+_se2.reset(seed=44)
+qb = p.getQuaternionFromEuler([0, 0, math.pi])  # face -x so rear is at +x rim
+p.resetBasePositionAndOrientation(_se2.robot_id, [0.31, 0, 0.04], qb)
+check("safety: rear-edge reflex -> drive inward",
+      _se2._apply_safety_override(1.0, -1.0, clear) == (1.0, 1.0))
+_se2.close()
+
+
+# =============================================================================
+# Q. Frame stacking (obs_stack)
+# =============================================================================
+section("Q. Frame stacking")
+
+def test_frame_stack():
+    base = make_env()
+    env = RawDistanceStack(base, k=DEFAULT_STACK_K)
+    ok_space = env.observation_space.shape == (stacked_dim(DEFAULT_STACK_K),)
+    obs, _ = env.reset(seed=33)
+    # On reset the ring is filled with frame-0 distances -> all K distance
+    # blocks identical; engineered tail passes through from the base obs.
+    d0 = obs[:3]
+    blocks_equal = all(np.allclose(obs[3 * j:3 * j + 3], d0) for j in range(DEFAULT_STACK_K))
+    # Step and confirm the newest block updates while old blocks shift.
+    obs1, _, _, _, _ = env.step(0)
+    shape_ok = obs1.shape == (stacked_dim(DEFAULT_STACK_K),)
+    env.close()
+    return ok_space, blocks_equal, shape_ok
+
+space_ok, reset_ok, step_ok = test_frame_stack()
+check("RawDistanceStack exposes the 21-D stacked space", space_ok,
+      f"expected ({stacked_dim(DEFAULT_STACK_K)},)")
+check("reset replicates frame-0 across all stack slots", reset_ok)
+check("stacked obs keeps shape after a step", step_ok)
+
+# Offline windowing matches the documented oldest-first layout + episode reset.
+def test_windowing():
+    # Two 3-step episodes; distances tick up so blocks are distinguishable.
+    obs = np.zeros((6, 12), dtype=np.float32)
+    for i in range(6):
+        obs[i, :3] = (i % 3) * 0.1          # 0.0,0.1,0.2 | 0.0,0.1,0.2
+    dones = np.array([0, 0, 1, 0, 0, 1], dtype=bool)
+    out = stack_from_trajectory(obs, dones, k=4)
+    # Row 0 (episode start): all four blocks replicate frame 0 (=0.0).
+    start_ok = np.allclose(out[0, :12], 0.0)
+    # Row 2 (3rd frame of ep0): blocks = [d0,d0,d1,d2] = [0,0,.1,.2].
+    mid_ok = np.allclose(out[2, :12], [0, 0, 0, 0, 0, 0, .1, .1, .1, .2, .2, .2])
+    # Row 3 is a fresh episode start -> must NOT see ep0 frames.
+    reset_ok = np.allclose(out[3, :12], 0.0)
+    return start_ok and mid_ok and reset_ok
+
+check("stack_from_trajectory respects layout + episode boundaries",
+      test_windowing())
+
+
+# =============================================================================
+# R. Behavioral + hard-sensor DR (alg/improvment)
+# =============================================================================
+section("R. Behavioral + hard-sensor DR")
+
+def opp_dr_samples(dr_on, n=12):
+    env = make_env(opponent_dr=dr_on)
+    speeds, gains, lats = set(), set(), set()
+    for s in range(n):
+        env.reset(seed=100 + s)
+        speeds.add(round(env._enemy_speed_mult, 5))
+        gains.add(round(env._enemy_tracking_gain, 5))
+        lats.add(env._enemy_action_latency)
+    env.close()
+    return speeds, gains, lats
+
+s_on, g_on, l_on = opp_dr_samples(True)
+check("opponent_dr varies enemy speed/turn/latency across episodes",
+      len(s_on) > 1 and len(g_on) > 1,
+      f"speeds={len(s_on)} gains={len(g_on)} lats={sorted(l_on)}")
+check("opponent_dr stays inside the declared ranges",
+      all(OPP_DR_SPEED_RANGE[0] <= x <= OPP_DR_SPEED_RANGE[1] for x in s_on)
+      and all(OPP_DR_TRACKING_RANGE[0] <= x <= OPP_DR_TRACKING_RANGE[1] for x in g_on)
+      and l_on.issubset(set(OPP_DR_REACTION_CHOICES)))
+
+s_off, g_off, l_off = opp_dr_samples(False)
+check("opponent_dr OFF is identity (speed=gain=1, no skew)",
+      s_off == {1.0} and g_off == {1.0})
+
+def hard_dr_probe(hard_on):
+    env = make_env(sensor_hard_dr=hard_on)
+    env.reset(seed=7)
+    sigma = env._tof_noise_sigma
+    bias_nonzero = bool(np.any(env._tof_calib_bias != 0.0))
+    flip = env._line_flip_prob
+    lat = env._action_latency
+    env.close()
+    return sigma, bias_nonzero, flip, lat
+
+sig_on, bias_on, flip_on, _ = hard_dr_probe(True)
+sig_off, bias_off, flip_off, lat_off = hard_dr_probe(False)
+check("hard sensor DR widens ToF sigma",
+      abs(sig_on - DR_TOF_NOISE_SIGMA_PCT_HARD * ENEMY_FAR_DIST) < 1e-9
+      and abs(sig_off - DR_TOF_NOISE_SIGMA_PCT * ENEMY_FAR_DIST) < 1e-9,
+      f"on={sig_on:.4f} off={sig_off:.4f}")
+check("hard sensor DR adds calibration bias + line flips (off=clean)",
+      bias_on and flip_on > 0.0 and not bias_off and flip_off == 0.0)
+check("standard latency profile is pinned to 1 when hard DR off",
+      lat_off == 1, f"lat_off={lat_off}")
+
+
+# =============================================================================
+# S. Held-out opponent zoo (alg/improvment)
+# =============================================================================
+section("S. Held-out zoo")
+
+check("zoo registry/weights stay consistent with held-out entries",
+      abs(sum(OPPONENT_WEIGHTS.values()) - 1.0) < 1e-9
+      and set(OPPONENT_WEIGHTS) == set(OPPONENT_REGISTRY)
+      and all(OPPONENT_WEIGHTS[h] == 0.0 for h in HELD_OUT_OPPONENT_IDS),
+      f"held_out={HELD_OUT_OPPONENT_IDS}")
+
+def heldout_runs(name):
+    env = make_env(force_opponent_id=name)
+    env.reset(seed=5)
+    ok = True
+    for _ in range(25):
+        _, _, term, trunc, info = env.step(env.action_space.sample())
+        ok = ok and (info["opponent_id"] == name)
+        if term or trunc:
+            env.reset()
+    env.close()
+    return ok
+
+check("held-out opponents instantiate and drive in-env",
+      all(heldout_runs(n) for n in HELD_OUT_OPPONENT_IDS))
 
 
 # =============================================================================
