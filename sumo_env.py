@@ -106,6 +106,28 @@ assert abs(STEP_DT_SECONDS - 1.0 / TARGET_ACTION_HZ) < 2.0e-3, (
     f"target {1000.0 / TARGET_ACTION_HZ:.2f} ms ({TARGET_ACTION_HZ} Hz)"
 )
 
+# alg/improvment: hardcoded opening charge — drive straight forward for the
+# first OPENING_CHARGE_SECONDS of each match (the standard sumo opening; the
+# user's robot and the zoo openers do the same). Opt-in; mirrored 1:1 in
+# firmware. ~100 ms quantizes to 2 env steps (2 * 41.7 ms = 83 ms).
+OPENING_CHARGE_SECONDS = 0.100
+OPENING_CHARGE_STEPS = max(1, round(OPENING_CHARGE_SECONDS / STEP_DT_SECONDS))
+
+# alg/improvment: spawn guard — for the first SPAWN_GUARD_SECONDS of a match,
+# if the policy commands net-backward, drive forward instead (otherwise leave
+# the action alone). The robot spawns close to the rear rim, and a self-out
+# timing study found ~⅓ of self-outs happen in the first ~1 s from backing
+# into the edge; after that, reversing can be legitimate. Mirrored in firmware.
+SPAWN_GUARD_SECONDS = 1.0
+SPAWN_GUARD_STEPS = max(1, round(SPAWN_GUARD_SECONDS / STEP_DT_SECONDS))
+
+# alg/improvment: anti-stall override — if the policy commands (near-)idle for
+# ANTISTALL_STEPS in a row, force a forward charge instead. A hard backstop on
+# top of the soft still-penalty, so the bot never freezes mid-match. Mirrored
+# in firmware. ~1 s of standing still = too long.
+ANTISTALL_SECONDS = 1.0
+ANTISTALL_STEPS = max(1, round(ANTISTALL_SECONDS / STEP_DT_SECONDS))
+
 # Initial agent-only forward charge at episode start (500 ms). The red
 # robot drives both wheels full forward; the enemy stays still until
 # the policy takes over.
@@ -174,11 +196,40 @@ DR_MASS_RANGE = (0.95, 1.05)           # uniform mult on each robot's chassis ma
 DR_VELOCITY_RANGE = (0.85, 1.0)        # uniform per-episode "battery sag" on max wheel ω
 DR_DEADZONE_RANGE = (0.20, 0.35)       # uniform per-episode PWM dead zone (sym, both wheels)
 DR_TOF_NOISE_SIGMA_PCT = 0.02          # gaussian σ as fraction of ENEMY_FAR_DIST
-DR_TOF_DROPOUT_PROB = 0.01             # per-sensor per-step "max-range" return
+# alg/improvment: disabled (was 0.01). Random per-step sensor "turn-off"
+# blinds the agent for a tick and triggers some self-outs / unstable play;
+# the real VL53L0X rarely drops, so 0 is both more stable and more
+# deploy-realistic. Mild gaussian ToF noise is kept for sim2real.
+DR_TOF_DROPOUT_PROB = 0.0              # per-sensor per-step "max-range" return
 # Pinned to a single value for the first 1M-step run so we don't debug
 # convergence + variable latency at the same time. After convergence is
 # confirmed, widen to (1, 2) for a robustness pass.
 DR_ACTION_LATENCY_CHOICES = (1,)       # discrete uniform queue depth (steps)
+
+# alg/improvment: a harder sensor-noise profile for training robustness,
+# opt-in via the env's sensor_hard_dr flag. Eval/audit keep the STANDARD
+# profile above so per-opponent win-rates stay comparable to the committed
+# baseline (the new model and the old one are scored under identical eval
+# noise). These model real VL53L0X / QTR failure modes the firmware can't
+# pre-filter; they are NOT mirrored in arduino_obs_logic.h because the
+# physical sensors produce them for free.
+DR_ACTION_LATENCY_CHOICES_HARD = (1, 2)   # widen latency under hard DR
+DR_TOF_NOISE_SIGMA_PCT_HARD = 0.03        # wider gaussian σ (≈24 mm)
+DR_TOF_CALIB_BIAS_SIGMA = 0.008           # per-channel per-episode bias (m)
+DR_TOF_STUCK_PROB = 0.05                  # per-episode chance one ToF channel sticks
+DR_TOF_STUCK_HOLD_PROB = 0.5              # while stuck, per-step chance to hold last
+DR_LINE_FLIP_PROB = 0.005                 # per-step per-line-sensor bit flip
+
+# alg/improvment: behavioral opponent domain randomization (training
+# only — disabled for eval so per-opponent win-rates stay reproducible).
+# Applied at the env boundary so the controller scripts stay pure: each
+# episode draws a wheel-speed multiplier (decouples "fast" from the
+# torque cap), a turn-sharpness multiplier (varies arc/spin tightness),
+# and an independent reaction latency. Turns the 5 fixed zoo scripts into
+# a continuum so the policy generalizes to robots it never trained on.
+OPP_DR_SPEED_RANGE = (0.7, 1.0)        # uniform mult on enemy wheel speed
+OPP_DR_TRACKING_RANGE = (0.8, 1.2)     # uniform mult on enemy turn sharpness
+OPP_DR_REACTION_CHOICES = (1, 2, 3)    # enemy action-queue depth (steps)
 
 # Legacy aliases (kept so external scripts importing these still work,
 # but they now map onto the new DR_* knobs).
@@ -222,14 +273,25 @@ REWARD_WIN = 10.0             # opponent off ring (any cause)
 # because the policy has full control over not driving off the edge.
 REWARD_LOSE_PUSH   = -15.0    # opponent pushed us off
 REWARD_LOSE_MUTUAL = -20.0    # both bots off in same step
-# Bumped -25 -> -50 (2x push-loss penalty). With anisotropic friction
-# + free-spin idle, the agent can now push decisively but tends to
-# over-commit and self-out. The previous -25 was too soft a deterrent:
-# training plateau'd on novamax/rammer at 4-10% in Phase 2 because the
-# policy was indifferent between push-loss (-15) and self-out (-25).
-# Wider gap makes self-out strictly worse than getting pushed.
-REWARD_LOSE_SELF   = -50.0    # walked off without recent contact (HEAVY)
+# alg/improvment: self-outs are the dominant loss at mult 3.0 (~82% of
+# losses, 92% of them forward drive-offs). The forward edge isn't
+# observable (rear-only line sensors), so reward shaping couldn't fix it;
+# this run instead HEAVILY punishes the terminal self-out (-50 -> -100,
+# 10x the win) to push the policy toward more conservative forward play
+# from scratch. Watch for over-correction into passive timeout-stalling
+# (timeout -10 becomes a "safe haven" vs a -100 self-out).
+REWARD_LOSE_SELF   = -50.0    # walked off without recent contact (HEAVY).
+                              # -100 was tried and did not reduce self-outs
+                              # (the forward edge is unobservable) — reverted
+                              # to the proven -50 to avoid timid play.
 REWARD_TIMEOUT     = -10.0
+# alg/improvment: per-step penalty for standing still (barely moving while not
+# in contact) — discourages freezing, timeout-stalling, and in-place spinning.
+REWARD_STILL_PENALTY = -0.05
+STILL_SPEED_THRESHOLD = 0.05   # m/s linear speed below this counts as "still"
+# alg/improvment: slight per-step penalty for going backward (net-reverse
+# command) — discourages retreating. Smaller than the still penalty.
+REWARD_BACKWARD_PENALTY = -0.02
 
 # Bearing-based tracking reward (Run 14 / 2D port). Fires only when the
 # opponent is within REWARD_TRACK_RANGE (close enough that orientation
@@ -301,6 +363,51 @@ APPROACH_MIN = 0.001          # filter pure float-noise reward only
 ENGAGEMENT_FRONT_THRESHOLD = 0.15
 ENGAGEMENT_MAX_STEPS = 30          # ~1.25 s @ 24 Hz
 REWARD_ENGAGE_PER_TICK = 0.10
+
+# alg/improvment: flank shaping (opt-in). Rewards driving the enemy
+# outward while positioned at its rear/side, so the policy learns to
+# attack from the back/left/right instead of only head-on. It fires
+# ONLY when the wedge push is already paying (enemy_r rising during
+# contact) AND the agent is heading into the enemy, so it cannot be
+# farmed by orbiting at range or while being pushed back. Capped per
+# episode well below a win, so it can only bias positioning into the
+# wedge/win path, never dominate the terminal outcome.
+REWARD_FLANK_PER_TICK = 0.08       # < REWARD_ENGAGE_PER_TICK (0.10)
+FLANK_RANGE = 0.18                 # m; near-contact only
+FLANK_MIN_RAD = math.radians(75)   # agent must be >75° off the enemy's nose
+FLANK_HEADING_HALF_RAD = math.radians(75)  # agent front within ±75° of enemy
+FLANK_EPISODE_CAP = 2.0            # << REWARD_WIN (10), << |REWARD_LOSE_SELF| (50)
+
+# alg/improvment: OBSERVABLE-PROXY edge avoidance (opt-in). An earlier
+# version used the agent's true radius/velocity — privileged state the
+# deployed 21-D policy never sees, so it could not transfer (a critique
+# confirmed it as reward-hacking, and two finetunes moved self-outs 0%).
+# Instrumentation showed 92% of self-outs are FORWARD drive-offs: the agent
+# charges straight ahead off the front rim, usually after losing the
+# opponent. There is no forward edge sensor, so we penalize the observable
+# BEHAVIOR that precedes it — driving straight forward with NOTHING detected
+# in the forward cone (nudging the policy to turn and re-acquire instead of
+# charging into the void) — plus the rear line sensors crossing the border
+# (the one direct, observable "at the edge" cue). Both use only features the
+# deployed policy observes, so the learned avoidance transfers to hardware.
+REWARD_BLIND_CHARGE = -0.06        # per-step: driving forward with no target
+REWARD_REAR_EDGE = -0.30           # per-step: a rear line sensor over the border
+PROXY_CLEAR_NORM = 0.5625          # ~45 cm (0.45/0.80): a target must be within
+                                   # ~40-50 cm to count as "detected"; charging
+                                   # forward with everything farther = blind.
+
+# alg/improvment: HARDCODED safety override (opt-in, deployable in firmware
+# 1:1 since it reads only observable signals). Reward shaping cannot stop
+# self-outs because the forward edge is unobservable; this deterministic
+# layer prevents the two self-out behaviors directly, BEFORE the command
+# reaches the motors. Active in both training (the policy co-adapts) and at
+# deploy. (1) Anti-blind-charge: if the policy commands net-forward but
+# NOTHING is detected (all 3 distances clear) and last_seen is lost, replace
+# it with an in-place scan-spin (re-acquire instead of charging into the
+# void). (2) Rear-edge reflex (priority): if a rear line sensor is over the
+# border, drive inward to recover. Mirrors the NovamaxController/CombatPolicy
+# edge reflexes the agent never had.
+SAFETY_CLEAR_NORM = 0.90           # nothing within ~0.72 m in a sensor = clear
 
 # Run 11 (DQN port): Narek-style discrete action map + semantic
 # action-conditioned reward shaping. The 9-action grid is the
@@ -471,9 +578,58 @@ class MiniSumoEnv(gym.Env):
         narek_reward: bool = False,
         tracking_reward: bool = False,
         action_consistency_reward: bool = False,
+        flank_reward: bool = False,
+        edge_avoid_reward: bool = False,
+        safety_override: bool = False,
+        opening_charge: bool = False,
+        spawn_guard: bool = False,
+        antistall: bool = False,
+        still_penalty: bool = False,
+        backward_penalty: bool = False,
+        enemy_as_agent: bool = False,
+        enemy_chassis_dr: bool = False,
+        mult_dr_range: Optional[tuple] = None,
+        opponent_dr: bool = False,
+        sensor_hard_dr: bool = False,
+        opponent_weights: Optional[dict] = None,
     ) -> None:
         super().__init__()
-        self.tracking_reward = bool(tracking_reward)
+        # alg/improvment: dense edge-avoidance shaping to cut self-outs
+        # (the dominant loss mode at high mult). Off by default.
+        self.edge_avoid_reward = bool(edge_avoid_reward)
+        # alg/improvment: hardcoded observable safety override (anti-blind-
+        # charge + rear-edge reflex), applied to the action before motors.
+        self.safety_override = bool(safety_override)
+        # alg/improvment: hardcoded opening forward charge (first ~100 ms).
+        self.opening_charge = bool(opening_charge)
+        # alg/improvment: spawn guard — early net-backward -> forward.
+        self.spawn_guard = bool(spawn_guard)
+        # alg/improvment: anti-stall — too many idle commands -> forward.
+        self.antistall = bool(antistall)
+        # alg/improvment: spawn the opponent on the agent chassis (robot.urdf).
+        self.enemy_as_agent = bool(enemy_as_agent)
+        # alg/improvment: per-episode opponent hardware/power randomization.
+        self.enemy_chassis_dr = bool(enemy_chassis_dr)
+        self.mult_dr_range = mult_dr_range
+        # alg/improvment: per-step penalty for standing still (see step()).
+        self.still_penalty = bool(still_penalty)
+        # alg/improvment: slight per-step penalty for going backward.
+        self.backward_penalty = bool(backward_penalty)
+        # alg/improvment: optional per-episode opponent sampling weights
+        # (e.g. a novamax-heavy mix for a targeted finetune). None = the
+        # zoo default. Ignored when force_opponent_id pins one opponent.
+        self.opponent_weights = opponent_weights
+        # alg/improvment: per-episode behavioral randomization of the
+        # opponent (training only). Off for eval/audit so WR is reproducible.
+        self.opponent_dr = bool(opponent_dr)
+        # alg/improvment: harder sensor-noise profile (training only). Off
+        # for eval/audit so the env matches the committed baseline exactly.
+        self.sensor_hard_dr = bool(sensor_hard_dr)
+        # Flank shaping rewards rear/side engagement; the bearing-based
+        # tracking reward penalizes the enemy being off the agent's nose,
+        # which directly conflicts. When flank is on, tracking is forced off.
+        self.flank_reward = bool(flank_reward)
+        self.tracking_reward = bool(tracking_reward) and not self.flank_reward
         self.action_consistency_reward = bool(action_consistency_reward)
 
         self.gui = gui
@@ -559,6 +715,17 @@ class MiniSumoEnv(gym.Env):
         # IrDeltaState reset, so there's no sim-to-real drift.
         self._prev_front_norm: float = 1.0
         self._prev_min_lateral: float = 1.0
+        # alg/improvment: cumulative flank reward paid this episode (cap).
+        self._flank_paid: float = 0.0
+        # alg/improvment: per-episode opponent DR state (defaults = no DR).
+        self._enemy_speed_mult: float = 1.0
+        self._enemy_tracking_gain: float = 1.0
+        self._enemy_action_latency: int = 1
+        # alg/improvment: per-episode hard-sensor-DR state (defaults = none).
+        self._tof_calib_bias: np.ndarray = np.zeros(3, dtype=np.float64)
+        self._tof_stuck_channel: Optional[int] = None
+        self._tof_stuck_last: Optional[float] = None
+        self._line_flip_prob: float = 0.0
         self._last_contact_step: int = -10_000
         self._steps = 0
         self._np_random: np.random.Generator = np.random.default_rng(seed)
@@ -839,7 +1006,9 @@ class MiniSumoEnv(gym.Env):
         ]
         if self._disabled_sensor is not None:
             readings[self._disabled_sensor] = None
-        # Per-step ToF noise + dropout (Step 4 domain randomization).
+        # Per-step ToF noise + dropout (Step 4 domain randomization). The
+        # per-episode calibration bias (zero unless hard sensor DR) is
+        # folded in here so it rides through the same clip.
         if self._tof_noise_sigma > 0.0 or self._tof_dropout_prob > 0.0:
             for i, r in enumerate(readings):
                 if r is None:
@@ -847,12 +1016,27 @@ class MiniSumoEnv(gym.Env):
                 if self._np_random.random() < self._tof_dropout_prob:
                     readings[i] = None
                     continue
-                noisy = r + float(self._np_random.normal(0.0, self._tof_noise_sigma))
+                noisy = (
+                    r
+                    + float(self._tof_calib_bias[i])
+                    + float(self._np_random.normal(0.0, self._tof_noise_sigma))
+                )
                 # Clip to a physical range. Above ENEMY_FAR_DIST = no-hit.
                 if noisy >= ENEMY_FAR_DIST:
                     readings[i] = None
                 else:
                     readings[i] = max(0.0, noisy)
+        # alg/improvment: stuck channel (hard sensor DR) — intermittently
+        # freezes one channel at its last value, modelling an I2C hold.
+        if self._tof_stuck_channel is not None:
+            ch = self._tof_stuck_channel
+            if (
+                self._tof_stuck_last is not None
+                and self._np_random.random() < DR_TOF_STUCK_HOLD_PROB
+            ):
+                readings[ch] = self._tof_stuck_last
+            else:
+                self._tof_stuck_last = readings[ch]
         return readings
 
     @staticmethod
@@ -920,6 +1104,13 @@ class MiniSumoEnv(gym.Env):
         line_r = 1.0 if self._line_triggered_at(
             self.robot_id, *AGENT_LINE_SENSORS[1],
         ) else 0.0
+        # alg/improvment: per-step line-sensor bit flip (hard sensor DR),
+        # modelling a dirty / edge-lit QTR. Zero-prob in eval.
+        if self._line_flip_prob > 0.0:
+            if self._np_random.random() < self._line_flip_prob:
+                line_l = 1.0 - line_l
+            if self._np_random.random() < self._line_flip_prob:
+                line_r = 1.0 - line_r
         return line_l, line_r
 
     def _build_obs(self, distances: list[Optional[float]]) -> np.ndarray:
@@ -978,6 +1169,30 @@ class MiniSumoEnv(gym.Env):
             return 0.0
         mag = max(0.0, abs(action) - dz) / (1.0 - dz)
         return math.copysign(mag, action) if action != 0.0 else 0.0
+
+    def _apply_safety_override(
+        self, left: float, right: float, distances: list,
+    ) -> tuple[float, float]:
+        """Hardcoded, observable safety layer (deployable in firmware 1:1).
+        Reads only the live distance + rear line sensors + last_seen latch.
+        (1) Rear-edge reflex (priority): a rear line sensor over the border
+            -> drive inward to recover. (2) Anti-blind-charge: net-forward
+            command with nothing detected and last_seen lost -> in-place
+            scan-spin instead of charging off the (unobservable) front rim.
+        """
+        rear_l = self._line_triggered_at(self.robot_id, *AGENT_LINE_SENSORS[0])
+        rear_r = self._line_triggered_at(self.robot_id, *AGENT_LINE_SENSORS[1])
+        if rear_l or rear_r:
+            return 1.0, 1.0
+        no_target = (
+            self.last_seen_dir == 0.0
+            and self._norm(distances[0]) > SAFETY_CLEAR_NORM
+            and self._norm(distances[1]) > SAFETY_CLEAR_NORM
+            and self._norm(distances[2]) > SAFETY_CLEAR_NORM
+        )
+        if no_target and left > 0.5 and right > 0.5:
+            return 1.0, -1.0
+        return left, right
 
     def _apply_motor_velocities(self, left_cmd: float, right_cmd: float) -> None:
         # Per-episode "battery sag" on the wheel-velocity cap.
@@ -1056,10 +1271,18 @@ class MiniSumoEnv(gym.Env):
         # a survival manoeuvre and must reach the motors at full
         # authority (it's what stops the bullet from skating off-ring).
         if not self._enemy_ctrl.is_edge_braking and max_rad > 1e-6:
+            # alg/improvment: behavioral DR. Skew the wheel differential
+            # (turn sharpness) then scale overall speed. Both are 1.0 when
+            # opponent_dr is off, so eval behavior is unchanged. Edge-
+            # braking already bypasses this block (survival authority).
+            mean = (left_omega + right_omega) * 0.5
+            diff = (left_omega - right_omega) * 0.5 * self._enemy_tracking_gain
+            left_omega = (mean + diff) * self._enemy_speed_mult
+            right_omega = (mean - diff) * self._enemy_speed_mult
             norm_l = float(left_omega) / max_rad
             norm_r = float(right_omega) / max_rad
             self._enemy_action_queue.append((norm_l, norm_r))
-            if len(self._enemy_action_queue) > self._action_latency:
+            if len(self._enemy_action_queue) > self._enemy_action_latency:
                 delayed_l, delayed_r = self._enemy_action_queue.pop(0)
             else:
                 delayed_l, delayed_r = 0.0, 0.0
@@ -1158,9 +1381,15 @@ class MiniSumoEnv(gym.Env):
         # PWM dead zone: U(0.20, 0.35), applied at the top of step().
         self._motor_deadzone = float(self._np_random.uniform(*DR_DEADZONE_RANGE))
 
-        # Action latency: discrete uniform over DR_ACTION_LATENCY_CHOICES.
-        idx = int(self._np_random.integers(0, len(DR_ACTION_LATENCY_CHOICES)))
-        self._action_latency = int(DR_ACTION_LATENCY_CHOICES[idx])
+        # Action latency: discrete uniform over the active choice set
+        # (widened under hard sensor DR).
+        latency_choices = (
+            DR_ACTION_LATENCY_CHOICES_HARD
+            if self.sensor_hard_dr
+            else DR_ACTION_LATENCY_CHOICES
+        )
+        idx = int(self._np_random.integers(0, len(latency_choices)))
+        self._action_latency = int(latency_choices[idx])
         self._action_queue: list[tuple[float, float]] = []
         # Run 9: enemy gets its own action FIFO and deadzone, same DR
         # distributions as the agent. Symmetric handicap kills the
@@ -1172,9 +1401,49 @@ class MiniSumoEnv(gym.Env):
             self._np_random.uniform(*DR_DEADZONE_RANGE)
         )
 
-        # ToF noise + dropout (per-step) parameters.
-        self._tof_noise_sigma = DR_TOF_NOISE_SIGMA_PCT * ENEMY_FAR_DIST
+        # alg/improvment: per-episode behavioral opponent DR (training
+        # only). Decouples speed from torque, varies turn sharpness, and
+        # gives the enemy its own reaction latency. Disabled for eval so
+        # the held-out controllers present a fixed, reproducible behavior.
+        if self.opponent_dr:
+            self._enemy_speed_mult = float(
+                self._np_random.uniform(*OPP_DR_SPEED_RANGE)
+            )
+            self._enemy_tracking_gain = float(
+                self._np_random.uniform(*OPP_DR_TRACKING_RANGE)
+            )
+            idx = int(self._np_random.integers(0, len(OPP_DR_REACTION_CHOICES)))
+            self._enemy_action_latency = int(OPP_DR_REACTION_CHOICES[idx])
+        else:
+            self._enemy_speed_mult = 1.0
+            self._enemy_tracking_gain = 1.0
+            self._enemy_action_latency = self._action_latency
+
+        # ToF noise + dropout (per-step) parameters. Sigma widens under
+        # hard sensor DR; the standard profile keeps eval comparable.
+        sigma_pct = (
+            DR_TOF_NOISE_SIGMA_PCT_HARD
+            if self.sensor_hard_dr
+            else DR_TOF_NOISE_SIGMA_PCT
+        )
+        self._tof_noise_sigma = sigma_pct * ENEMY_FAR_DIST
         self._tof_dropout_prob = DR_TOF_DROPOUT_PROB
+
+        # alg/improvment: hard-sensor-DR per-episode draws (train only).
+        if self.sensor_hard_dr:
+            self._tof_calib_bias = self._np_random.normal(
+                0.0, DR_TOF_CALIB_BIAS_SIGMA, size=3,
+            )
+            if self._np_random.random() < DR_TOF_STUCK_PROB:
+                self._tof_stuck_channel = int(self._np_random.integers(0, 3))
+            else:
+                self._tof_stuck_channel = None
+            self._line_flip_prob = DR_LINE_FLIP_PROB
+        else:
+            self._tof_calib_bias = np.zeros(3, dtype=np.float64)
+            self._tof_stuck_channel = None
+            self._line_flip_prob = 0.0
+        self._tof_stuck_last = None
 
         # Legacy episode-long dead sensor (still respected; default 0%).
         if self._np_random.random() < SENSOR_DEAD_PROB:
@@ -1223,8 +1492,21 @@ class MiniSumoEnv(gym.Env):
             self.robot_id, -1, mass=ROBOT_MASS_NOMINAL * agent_mass_mult,
         )
 
+        # alg/improvment: per-episode power randomization (different torque
+        # mults) so the agent faces a range of opponent strengths.
+        if self.mult_dr_range is not None:
+            self.novamax_torque_mult = float(
+                self._np_random.uniform(*self.mult_dr_range))
+
+        # alg/improvment: enemy chassis. enemy_as_agent forces the AGENT
+        # chassis (robot.urdf); enemy_chassis_dr randomizes it 50/50 per
+        # episode, so the agent meets opponents on different hardware (and
+        # learns the equal-power dynamics, not just the novamax chassis).
+        use_agent_chassis = self.enemy_as_agent or (
+            self.enemy_chassis_dr and self._np_random.random() < 0.5)
+        enemy_urdf = ROBOT_URDF if use_agent_chassis else NOVAMAX_URDF
         self.enemy_id, enemy_joints = self._spawn_robot(
-            enemy_pos, enemy_yaw, ENEMY_RGBA, urdf_path=NOVAMAX_URDF,
+            enemy_pos, enemy_yaw, ENEMY_RGBA, urdf_path=enemy_urdf,
         )
         self._enemy_left_idx = enemy_joints["left_wheel_joint"]
         self._enemy_right_idx = enemy_joints["right_wheel_joint"]
@@ -1243,7 +1525,9 @@ class MiniSumoEnv(gym.Env):
             self._opponent_id = self.force_opponent_id
             self._enemy_ctrl = make_opponent(self._opponent_id)
         else:
-            self._opponent_id, self._enemy_ctrl = sample_opponent(self._np_random)
+            self._opponent_id, self._enemy_ctrl = sample_opponent(
+                self._np_random, self.opponent_weights,
+            )
         self._enemy_ctrl.reset()
 
         self.last_seen_dir = 0.0
@@ -1258,6 +1542,9 @@ class MiniSumoEnv(gym.Env):
         self._wedge_total_score = 0.0
         self._wedge_engaged_ticks = 0
         self._wedge_being_wedged_ticks = 0
+        self._flank_paid = 0.0
+        self._opening_charge_left = OPENING_CHARGE_STEPS if self.opening_charge else 0
+        self._idle_streak = 0
         self._steps = 0
         # Step 6: tracks the env-step at which the last agent↔enemy
         # contact was observed. Used to distinguish push-loss from
@@ -1345,6 +1632,43 @@ class MiniSumoEnv(gym.Env):
             raw_left = float(np.clip(action[0], -1.0, 1.0))
             raw_right = float(np.clip(action[1], -1.0, 1.0))
 
+        # alg/improvment: hardcoded safety override. Reads the live sensors
+        # (same as the firmware would, just before driving) and replaces the
+        # commanded action when it would blind-charge or sit on the rear edge.
+        # Applied here so raw_left/raw_right (motors, reward gates, the
+        # prev_action obs latch) all reflect the action actually executed.
+        if self.safety_override:
+            raw_left, raw_right = self._apply_safety_override(
+                raw_left, raw_right, self._raw_distances(),
+            )
+
+        # alg/improvment: hardcoded opening charge — force straight forward
+        # for the first ~100 ms of the match (deterministic, mirrored in
+        # firmware). Applied last so it overrides policy + safety at the start.
+        if self._opening_charge_left > 0:
+            raw_left, raw_right = 1.0, 1.0
+            self._opening_charge_left -= 1
+
+        # alg/improvment: spawn guard — early in the match, a net-backward
+        # command drives the robot into the rear rim (it spawns near it), so
+        # go forward instead; later, reversing is left alone. Mirrored in
+        # firmware. self._steps is 0-indexed at the top of step().
+        if (self.spawn_guard and self._steps < SPAWN_GUARD_STEPS
+                and (raw_left + raw_right) < 0.0):
+            raw_left, raw_right = 1.0, 1.0
+
+        # alg/improvment: anti-stall — if the policy keeps commanding (near-)
+        # idle, force a forward charge so it never freezes mid-match. Mirrored
+        # in firmware.
+        if self.antistall:
+            if abs(raw_left) < 0.5 and abs(raw_right) < 0.5:
+                self._idle_streak += 1
+            else:
+                self._idle_streak = 0
+            if self._idle_streak >= ANTISTALL_STEPS:
+                raw_left, raw_right = 1.0, 1.0
+                self._idle_streak = 0
+
         # Domain randomization (Step 4): action latency → dead zone.
         # The new action enters the FIFO; the action that left the FIFO
         # (or zeros, while the queue is warming up) is what physically
@@ -1377,8 +1701,8 @@ class MiniSumoEnv(gym.Env):
             if self.gui:
                 time.sleep(SIM_TIMESTEP)
 
-        agent_pos, _ = p.getBasePositionAndOrientation(self.robot_id)
-        enemy_pos, _ = p.getBasePositionAndOrientation(self.enemy_id)
+        agent_pos, agent_orn = p.getBasePositionAndOrientation(self.robot_id)
+        enemy_pos, enemy_orn = p.getBasePositionAndOrientation(self.enemy_id)
         agent_out = agent_pos[2] < FALL_Z
         enemy_out = enemy_pos[2] < FALL_Z
 
@@ -1473,6 +1797,22 @@ class MiniSumoEnv(gym.Env):
             else:
                 self._engagement_timer = 0
 
+            # alg/improvment: standing-still penalty. Punish barely moving
+            # while NOT in contact (so genuine push stalemates are exempt —
+            # the stuck-detector handles those). Discourages freezing,
+            # timeout-stalling, and useless in-place spinning (low linear
+            # speed). Opt-in so future finetunes can include it.
+            if self.still_penalty and not contacts:
+                a_lv, _ = p.getBaseVelocity(self.robot_id)
+                if math.hypot(a_lv[0], a_lv[1]) < STILL_SPEED_THRESHOLD:
+                    components["still"] = REWARD_STILL_PENALTY
+
+            # alg/improvment: slight penalty for a net-backward (reverse)
+            # command — discourages retreating. Uses the executed action so
+            # the opening charge / safety override are correctly exempt.
+            if self.backward_penalty and (raw_left + raw_right) < 0.0:
+                components["backward"] = REWARD_BACKWARD_PENALTY
+
             # Run 11: Narek-style action-conditioned reward shaping.
             # Mirrors github.com/Narek2008654/Simulator/data_reader.py.
             # Computed on the COMMANDED action (raw_left/raw_right pre-
@@ -1561,6 +1901,65 @@ class MiniSumoEnv(gym.Env):
             if approach_delta > APPROACH_MIN:
                 components["approach"] = approach_delta * REWARD_APPROACH
             self.prev_agent_to_enemy = current_agent_to_enemy
+
+            # alg/improvment: flank shaping. Only when the wedge push is
+            # already paying (enemy_r rising during contact) — that means
+            # the agent is actively driving the enemy outward, not being
+            # pushed and not merely orbiting. Reward scales with how far
+            # behind/beside the enemy the agent is, and requires the agent
+            # to be heading into the enemy. Capped per episode.
+            if (
+                self.flank_reward
+                and wedge_delta_r > APPROACH_MIN
+                and self._flank_paid < FLANK_EPISODE_CAP
+            ):
+                fdx = agent_pos[0] - enemy_pos[0]
+                fdy = agent_pos[1] - enemy_pos[1]
+                if math.hypot(fdx, fdy) < FLANK_RANGE:
+                    enemy_yaw = p.getEulerFromQuaternion(enemy_orn)[2]
+                    # Agent's bearing in the enemy's heading frame:
+                    # 0 = in front of the enemy, ±π = directly behind it.
+                    rel = (
+                        math.atan2(fdy, fdx) - enemy_yaw + math.pi
+                    ) % (2.0 * math.pi) - math.pi
+                    pos_q = (abs(rel) - FLANK_MIN_RAD) / (math.pi - FLANK_MIN_RAD)
+                    if pos_q > 0.0:
+                        agent_yaw = p.getEulerFromQuaternion(agent_orn)[2]
+                        head_err = (
+                            math.atan2(-fdy, -fdx) - agent_yaw + math.pi
+                        ) % (2.0 * math.pi) - math.pi
+                        if abs(head_err) < FLANK_HEADING_HALF_RAD:
+                            pay = min(
+                                REWARD_FLANK_PER_TICK * min(1.0, pos_q),
+                                FLANK_EPISODE_CAP - self._flank_paid,
+                            )
+                            components["flank"] = pay
+                            self._flank_paid += pay
+
+            # alg/improvment: OBSERVABLE-PROXY edge avoidance. Uses only
+            # signals the deployed policy sees, so the learned behavior
+            # transfers. (1) Penalize a blind forward charge — both wheels
+            # forward while nothing is detected anywhere in the forward cone
+            # (no last-seen latch and all three distances clear): this is the
+            # pattern that precedes the 92%-dominant forward self-out, and the
+            # penalty nudges the policy to turn and re-acquire instead.
+            # (2) Penalize the rear line sensors over the border — the one
+            # direct observable "at the edge" cue.
+            if self.edge_avoid_reward:
+                left_norm = self._norm(distances[1])
+                right_norm = self._norm(distances[2])
+                no_target = (
+                    self.last_seen_dir == 0.0
+                    and front_norm > PROXY_CLEAR_NORM
+                    and left_norm > PROXY_CLEAR_NORM
+                    and right_norm > PROXY_CLEAR_NORM
+                )
+                if no_target and raw_left > 0.5 and raw_right > 0.5:
+                    components["blindcharge"] = REWARD_BLIND_CHARGE
+                rear_l = self._line_triggered_at(self.robot_id, *AGENT_LINE_SENSORS[0])
+                rear_r = self._line_triggered_at(self.robot_id, *AGENT_LINE_SENSORS[1])
+                if rear_l or rear_r:
+                    components["rearedge"] = REWARD_REAR_EDGE
 
         # Step counter advances here so MAX_EPISODE_STEPS is checked
         # against the count *after* this transition.

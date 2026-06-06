@@ -25,6 +25,14 @@ checkpoints_dqn/
 checkpoints_novamax*/
 checkpoints_v3/
 runs_v4/
+# Only the deployed / canonical model weights are tracked; experiment-variant
+# checkpoints are regenerable from training and stay local.
+checkpoints/*.pt
+!checkpoints/dqn3d_stack_stageA_best.pt
+!checkpoints/ppo_robust_best.pt
+!checkpoints/dqn_3d_bc_actor_best.pt
+!checkpoints/dqn_3d_bc_actor_final.pt
+!checkpoints/dqn_3d_bc_oldphys_best.pt
 # BC datasets are large + regenerable in Phase 0a (~5 min each).
 data/*.npz
 # Training logs.

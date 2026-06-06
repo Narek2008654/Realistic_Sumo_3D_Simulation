@@ -46,15 +46,28 @@ from sumo_env import (
     DISCRETE_ACTION_MAP,
     MiniSumoEnv,
 )
+from obs_stack import RawDistanceStack, stacked_dim, DEFAULT_STACK_K, ENGINEERED_DIM
 from combat_policy import CombatPolicy
 
 # ---------------------------------------------------------------------------
 # Hyperparameters
 # ---------------------------------------------------------------------------
 SEED = 42
+# alg/improvment: the base env still emits a 12-D obs; the policy network
+# consumes the K-frame raw-distance stack (RawDistanceStack) = 21-D for
+# K=4. NET_OBS_DIM is the actual network input width.
 OBS_DIM = 12
+STACK_K = DEFAULT_STACK_K
+NET_OBS_DIM = stacked_dim(STACK_K)        # 3*K + 9 = 21 for K=4
 N_ACTIONS = 9
-NET_ARCH = (48, 48)
+# 32x32: the deployable Nano-friendly size (~2k params, ~8 KB flash, fits
+# the 24 Hz budget in float32) and the size of the best model so far
+# (Stage-A). 48x48 did not beat it at mult 3.0.
+NET_ARCH = (32, 32)
+
+# Smoke mode (DQN_SMOKE=1): tiny collection + a few thousand online steps
+# to validate the whole pipeline end-to-end before the multi-hour run.
+SMOKE = bool(os.environ.get("DQN_SMOKE"))
 
 # Run 15: continue training from Run-14's v2 model, adding the new
 # action-persistence (anti-flicker) reward on top of the tracking
@@ -73,12 +86,27 @@ CONTINUE_FINAL_PATH = CHECKPOINTS / "dqn_3d_actor_final.pt"
 # Phase-1 peak.
 TRACKING_REWARD = True
 ACTION_CONSISTENCY_REWARD = True
+# alg/improvment: hardcoded observable safety override (rear-edge reflex +
+# anti-blind-charge) active during training so the policy co-adapts and the
+# deployed model carries the same deterministic reflexes.
+SAFETY_OVERRIDE = True
 
 GAMMA = 0.99
 N_STEP = 3
 TAU = 0.005                # Polyak coefficient for target net soft update
 BATCH_SIZE = 256
 REPLAY_CAPACITY = 200_000
+
+# alg/improvment v3: demonstration retention (DQfD-style). The winning BC
+# transitions are kept in a persistent buffer and mixed into every online
+# gradient step — a 1-step Bellman loss plus a supervised large-margin loss
+# that keeps the winning action's Q above the others. This anchors the
+# policy to the teacher's winning behavior so online exploration against
+# aggressive opponents refines it instead of catastrophically forgetting it.
+DEMO_BATCH = 128
+DEMO_BELLMAN_WEIGHT = 1.0
+DEMO_MARGIN_WEIGHT = 1.0
+DEMO_MARGIN = 0.8
 
 # Run 12: per-opponent collection program. Each entry is
 # (opp_id, torque_mult, max_env_steps, n_pairs_target). Mults are
@@ -122,13 +150,18 @@ if CONTINUE_TRAINING:
 else:
     ONLINE_TIMESTEPS_PER_PHASE = (
         # (torque_mult, steps, force_opponent_id_or_None)
+        # alg/improvment v3: dodger phase-1 restored (it builds clean wedge/
+        # evasion mechanics on an easy opponent that generalize — removing it
+        # hurt). Extended mult-3.0 phase: that is the eval/deploy target
+        # (65% overall, 55% novamax @ mult 3).
         (0.7, 100_000, "dodger"),
         (1.0, 200_000, None),
         (1.5, 200_000, None),
         (2.0, 200_000, None),
-        (3.0, 300_000, None),
+        (3.0, 400_000, None),
     )
-ONLINE_LR = 3e-4
+ONLINE_LR = 1e-4   # v3: was 3e-4 — conservative online updates so winner-only
+                   # BC behavior is refined, not catastrophically forgotten.
 # Run 13 (2D): slower / floored eps schedule + per-phase bump.
 # EPS_DECAY_STEPS lengthened from 200k to 600k so exploration stays
 # meaningful through the curriculum; EPS_END raised from 0.02 to 0.05
@@ -144,17 +177,22 @@ if CONTINUE_TRAINING:
     EPS_DECAY_STEPS = 400_000
     PHASE_BUMP_EPS = 0.12
 else:
-    EPS_START = 0.30
-    EPS_END = 0.05
+    # v3: lower exploration (was 0.30/0.05). Random play against aggressive
+    # opponents floods replay with losses and erodes the BC winning behavior;
+    # demo retention does the rest of the heavy lifting.
+    EPS_START = 0.20
+    EPS_END = 0.03
     EPS_DECAY_STEPS = 600_000
-    PHASE_BUMP_EPS = 0.20
+    PHASE_BUMP_EPS = 0.12
 TRAIN_EVERY = 4            # gradient step every N env steps
 TARGET_UPDATE_EVERY = 1    # Polyak soft update every step
 
 HERE = HERE_TOP
 OUTPUT_DIR = HERE / "checkpoints" / "dqn_intermediate"
-BEST_PATH = CHECKPOINTS / "dqn_3d_bc_actor_best.pt"
-FINAL_PATH = CHECKPOINTS / "dqn_3d_bc_actor_final.pt"
+# alg/improvment: new checkpoint names so the committed (deployed)
+# baseline dqn_3d_bc_actor_best.pt is preserved for head-to-head eval.
+BEST_PATH = CHECKPOINTS / "dqn3d_stable_best.pt"
+FINAL_PATH = CHECKPOINTS / "dqn3d_stable_final.pt"
 # (CONTINUE_TRAINING and related constants are declared above.)
 # Collected winning dataset cached to disk so subsequent runs can
 # skip Phase 0a entirely. Two sources are supported and concatenated
@@ -164,9 +202,60 @@ FINAL_PATH = CHECKPOINTS / "dqn_3d_bc_actor_final.pt"
 # Delete the relevant file to force fresh collection (e.g. if the
 # env / reward / policy change). Human data is always preserved
 # across scripted re-collections because it lives in a separate file.
-BC_DATASET_PATH = DATA / "bc_dataset_3d_v3.npz"
+# alg/improvment: 21-D stacked dataset (the v3/human sets are 12-D and
+# incompatible — the loader skips any source whose width != NET_OBS_DIM).
+BC_DATASET_PATH = DATA / "bc_dataset_3d_v6.npz"
 BC_HUMAN_DATASET_PATH = DATA / "bc_dataset_human.npz"
 LOG_EVERY = 5_000
+
+# Smoke shrink: validate collect -> pretrain -> online -> export end-to-end
+# in ~2 min. Must run BEFORE the function defs so OFFLINE_EPOCHS is captured
+# in offline_pretrain's default arg.
+if SMOKE:
+    OFFLINE_COLLECTION_PROGRAM = (
+        ("dodger", 1.0, 4_000, 400),
+        ("novamax", 1.0, 4_000, 400),
+    )
+    ONLINE_TIMESTEPS_PER_PHASE = (
+        (1.0, 3_000, "dodger"),
+        (1.5, 3_000, None),
+    )
+    OFFLINE_EPOCHS = 2
+    LOG_EVERY = 1_000
+
+# alg/improvment: self-out-fix finetune (set DQN_FINETUNE=1). ~82% of
+# losses at mult 3.0 are self-outs, so resume the best base model and
+# train at mult 3.0 with edge-avoidance shaping ON over the BALANCED zoo
+# (an earlier novamax-weighted mix caused catastrophic interference and
+# regressed the strong opponents). Demo retention keeps the winning
+# behavior; low eps refines rather than re-explores. Set DQN_FINETUNE_FROM
+# to whichever base model (32x32 Stage-A or 48x48) evaluated best.
+FINETUNE = bool(os.environ.get("DQN_FINETUNE"))
+FINETUNE_RESUME = CHECKPOINTS / os.environ.get(
+    "DQN_FINETUNE_FROM", "dqn3d_stack_stageA_best.pt",
+)
+FINETUNE_PHASES = ((3.0, 400_000, None),)
+FINETUNE_EPS_START = 0.12
+if SMOKE and FINETUNE:
+    FINETUNE_PHASES = ((3.0, 3_000, None),)
+
+
+# ---------------------------------------------------------------------------
+# Env factory + checkpointing helpers
+# ---------------------------------------------------------------------------
+def build_env(**kwargs) -> RawDistanceStack:
+    """Construct the discrete-action sumo env wrapped in the K-frame
+    raw-distance stack. All policy-facing code sees the stacked obs."""
+    kwargs.setdefault("action_space_kind", "discrete")
+    return RawDistanceStack(MiniSumoEnv(**kwargs), k=STACK_K)
+
+
+def save_checkpoint_atomic(state_dict, path: Path) -> None:
+    """Write a checkpoint via a temp file + os.replace so a concurrent
+    eval never reads a half-written file (Windows torch.save isn't atomic)."""
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    torch.save(state_dict, str(tmp))
+    os.replace(str(tmp), str(path))
 
 
 # ---------------------------------------------------------------------------
@@ -340,6 +429,23 @@ def double_dqn_loss(
     return F.smooth_l1_loss(q_pred, td_target)
 
 
+def demo_margin_loss(
+    online: DuelingQNet, obs: torch.Tensor, actions: torch.Tensor,
+    margin: float = DEMO_MARGIN,
+) -> torch.Tensor:
+    """DQfD large-margin supervised loss: push Q(s, a_expert) to exceed
+    every other action's Q by at least ``margin``. Zero once the expert
+    action is already the (margin-separated) argmax, so it only corrects
+    states where the policy has drifted off the demonstrated action.
+    """
+    q = online(obs)                                   # (B, A)
+    rows = torch.arange(q.shape[0])
+    margins = torch.full_like(q, margin)
+    margins[rows, actions] = 0.0
+    violation = (q + margins).max(dim=1).values - q[rows, actions]
+    return violation.mean()
+
+
 def polyak_update(online: DuelingQNet, target: DuelingQNet, tau: float) -> None:
     """target = tau*online + (1-tau)*target, in-place."""
     with torch.no_grad():
@@ -354,6 +460,7 @@ def collect_winning_dataset(
     program: tuple[tuple[str, float, int, int], ...],
     seed: int = SEED + 1,
     verbose: bool = True,
+    explore_eps: float = 0.10,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Run ``CombatPolicy`` against each entry in ``program`` and keep
     transitions from WINNING episodes only.
@@ -370,11 +477,10 @@ def collect_winning_dataset(
     """
     all_obs, all_act, all_rew, all_next, all_done = [], [], [], [], []
     for prog_idx, (opp, mult, max_steps, n_pairs) in enumerate(program):
-        env = MiniSumoEnv(
+        env = build_env(
             gui=False, seed=seed + prog_idx,
             novamax_torque_mult=mult,
             force_opponent_id=opp,
-            action_space_kind="discrete",
             narek_reward=True,
         )
         obs, _ = env.reset(seed=seed + prog_idx)
@@ -390,8 +496,14 @@ def collect_winning_dataset(
         n_attempts = 0
         while n_added < n_pairs and n_attempts < max_steps:
             n_attempts += 1
-            l_cont, r_cont = policy(obs)
-            a_idx = quantize_to_idx(l_cont, r_cont)
+            # The teacher reads the CURRENT 12-D frame (tail of the stack);
+            # epsilon-exploration occasionally substitutes a random action so
+            # the winning set covers all 9 actions, not just the teacher's 3.
+            l_cont, r_cont = policy(obs[-OBS_DIM:])
+            if random.random() < explore_eps:
+                a_idx = random.randrange(N_ACTIONS)
+            else:
+                a_idx = quantize_to_idx(l_cont, r_cont)
             next_obs, reward, terminated, truncated, info = env.step(a_idx)
             done = bool(terminated or truncated)
 
@@ -428,12 +540,12 @@ def collect_winning_dataset(
             )
 
     obs_arr = np.stack(all_obs).astype(np.float32) if all_obs else np.zeros(
-        (0, OBS_DIM), dtype=np.float32,
+        (0, NET_OBS_DIM), dtype=np.float32,
     )
     act_arr = np.array(all_act, dtype=np.int64)
     rew_arr = np.array(all_rew, dtype=np.float32)
     next_arr = np.stack(all_next).astype(np.float32) if all_next else np.zeros(
-        (0, OBS_DIM), dtype=np.float32,
+        (0, NET_OBS_DIM), dtype=np.float32,
     )
     done_arr = np.array(all_done, dtype=np.float32)
     if verbose:
@@ -503,19 +615,51 @@ def online_finetune(
     target: DuelingQNet,
     initial_mult: float,
     initial_opp: Optional[str],
+    demos: Optional[tuple] = None,
+    phases: Optional[tuple] = None,
+    opponent_weights: Optional[dict] = None,
+    eps_start: Optional[float] = None,
+    edge_avoid: bool = False,
 ) -> dict:
-    env = MiniSumoEnv(
+    # alg/improvment v2: Stage A learns to fight under the STANDARD noise
+    # regime (the same one the 40% baseline trained under) plus flank
+    # shaping + frame-stack memory. Opponent-DR and hard-sensor-DR are OFF
+    # here — piling them on from step 1 crippled perception of fast
+    # opponents and the policy collapsed. They return in a Stage-B
+    # robustness finetune once the clean win-rate target is met.
+    # ``phases`` / ``opponent_weights`` / ``eps_start`` let a targeted
+    # finetune override the curriculum, zoo mix, and exploration.
+    if phases is None:
+        phases = ONLINE_TIMESTEPS_PER_PHASE
+    env = build_env(
         gui=False, seed=SEED,
         novamax_torque_mult=initial_mult,
         force_opponent_id=initial_opp,
-        action_space_kind="discrete",
         narek_reward=True,
-        tracking_reward=TRACKING_REWARD,
         action_consistency_reward=ACTION_CONSISTENCY_REWARD,
+        flank_reward=True,
+        edge_avoid_reward=edge_avoid,
+        safety_override=SAFETY_OVERRIDE,
+        opponent_dr=False,
+        sensor_hard_dr=False,
+        opponent_weights=opponent_weights,
     )
     buffer = NStepReplayBuffer(REPLAY_CAPACITY, GAMMA, N_STEP)
     opt = torch.optim.Adam(online.parameters(), lr=ONLINE_LR)
     gamma_n = GAMMA ** N_STEP
+
+    # Persistent demonstration tensors (winner-only BC transitions). Mixed
+    # into every gradient step so the policy never forgets winning behavior.
+    demo_n = 0
+    if demos is not None and demos[0].shape[0] > 0:
+        d_obs, d_act, d_rew, d_next, d_done = demos
+        demo_obs_t = torch.as_tensor(d_obs)
+        demo_act_t = torch.as_tensor(d_act)
+        demo_rew_t = torch.as_tensor(d_rew)
+        demo_next_t = torch.as_tensor(d_next)
+        demo_done_t = torch.as_tensor(d_done)
+        demo_n = d_obs.shape[0]
+        print(f"  demo retention: {demo_n} winning transitions held", flush=True)
 
     obs, _ = env.reset(seed=SEED)
     step = 0
@@ -523,18 +667,21 @@ def online_finetune(
     recent_outcomes: deque[int] = deque(maxlen=200)
     per_opp_outcomes: dict[str, deque[int]] = {}
     best_score = -1.0
-    eps = EPS_START
+    eps = EPS_START if eps_start is None else eps_start
 
     # Per-step linear eps decay rate (constant). The decay is applied
     # incrementally so phase-bump resets stick instead of getting
     # overwritten by a step-indexed schedule.
-    eps_step_decay = (EPS_START - EPS_END) / EPS_DECAY_STEPS
+    eps_step_decay = (eps - EPS_END) / EPS_DECAY_STEPS
 
     for phase_idx, (mult, n_steps, force_opp) in enumerate(
-        ONLINE_TIMESTEPS_PER_PHASE, start=1,
+        phases, start=1,
     ):
-        env.novamax_torque_mult = float(mult)
-        env.force_opponent_id = force_opp
+        # Set on .unwrapped: attribute writes on a gym.Wrapper bind to the
+        # wrapper, not the underlying env, so the curriculum knobs would
+        # otherwise silently no-op.
+        env.unwrapped.novamax_torque_mult = float(mult)
+        env.unwrapped.force_opponent_id = force_opp
         # Reset the rolling WR window at each phase boundary: the
         # best-checkpoint score = wr * mult must measure WR against the
         # CURRENT phase opponent/mult, not stale outcomes carried over
@@ -547,7 +694,7 @@ def online_finetune(
             eps = max(eps, PHASE_BUMP_EPS)
         print(
             f"\n=== DQN online phase {phase_idx}/"
-            f"{len(ONLINE_TIMESTEPS_PER_PHASE)}: mult={mult}, "
+            f"{len(phases)}: mult={mult}, "
             f"opp={force_opp or 'zoo'}, {n_steps} steps  "
             f"(eps={eps:.3f}) ===",
             flush=True,
@@ -592,6 +739,17 @@ def online_finetune(
                     torch.as_tensor(r), torch.as_tensor(no_),
                     torch.as_tensor(d), gamma_n=gamma_n,
                 )
+                if demo_n:
+                    sel = np.random.randint(0, demo_n, size=DEMO_BATCH)
+                    # Demos are 1-step transitions -> gamma^1, not gamma^n.
+                    loss = loss + DEMO_BELLMAN_WEIGHT * double_dqn_loss(
+                        online, target,
+                        demo_obs_t[sel], demo_act_t[sel], demo_rew_t[sel],
+                        demo_next_t[sel], demo_done_t[sel], gamma_n=GAMMA,
+                    )
+                    loss = loss + DEMO_MARGIN_WEIGHT * demo_margin_loss(
+                        online, demo_obs_t[sel], demo_act_t[sel],
+                    )
                 opt.zero_grad()
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(online.parameters(), max_norm=10.0)
@@ -610,7 +768,7 @@ def online_finetune(
                     save_path = (
                         CONTINUE_BEST_PATH if CONTINUE_TRAINING else BEST_PATH
                     )
-                    torch.save(online.state_dict(), str(save_path))
+                    save_checkpoint_atomic(online.state_dict(), save_path)
                     marker = "  *BEST*"
                 opp_strs = []
                 for o_id in sorted(per_opp_outcomes):
@@ -629,7 +787,7 @@ def online_finetune(
 
     env.close()
     final_path = CONTINUE_FINAL_PATH if CONTINUE_TRAINING else FINAL_PATH
-    torch.save(online.state_dict(), str(final_path))
+    save_checkpoint_atomic(online.state_dict(), final_path)
     return {
         "total_steps": step,
         "total_episodes": episodes,
@@ -652,9 +810,61 @@ def main() -> None:
         f"n_step={N_STEP}, tau={TAU}",
         flush=True,
     )
-    online = DuelingQNet(OBS_DIM, N_ACTIONS, hidden=NET_ARCH)
-    target = DuelingQNet(OBS_DIM, N_ACTIONS, hidden=NET_ARCH)
+    online = DuelingQNet(NET_OBS_DIM, N_ACTIONS, hidden=NET_ARCH)
+    target = DuelingQNet(NET_OBS_DIM, N_ACTIONS, hidden=NET_ARCH)
     target.load_state_dict(online.state_dict())
+
+    # alg/improvment: targeted novamax finetune. Resume the Stage-A best,
+    # skip Phase 0, and run a mult-3.0 novamax-heavy online pass with demo
+    # retention, then re-export. Best checkpoint still goes to BEST_PATH
+    # (back it up before launching if you want to keep the Stage-A model).
+    if FINETUNE:
+        if not FINETUNE_RESUME.exists():
+            raise SystemExit(
+                f"DQN_FINETUNE=1 but resume checkpoint not found: "
+                f"{FINETUNE_RESUME}"
+            )
+        state = torch.load(
+            str(FINETUNE_RESUME), map_location="cpu", weights_only=True,
+        )
+        # Rebuild the net at the resume checkpoint's architecture so the
+        # finetune works on either base (32x32 Stage-A or 48x48) regardless
+        # of the module-level NET_ARCH.
+        fh1, fobs = state["trunk.0.weight"].shape
+        fh2 = state["trunk.2.weight"].shape[0]
+        fnact = state["advantage_head.weight"].shape[0]
+        online = DuelingQNet(fobs, fnact, hidden=(fh1, fh2))
+        target = DuelingQNet(fobs, fnact, hidden=(fh1, fh2))
+        online.load_state_dict(state)
+        target.load_state_dict(state)
+        cached = np.load(BC_DATASET_PATH)
+        demos = (
+            cached["obs"], cached["act"], cached["rew"],
+            cached["next"], cached["done"],
+        )
+        print(
+            f"\nFINETUNE (self-out fix): resume {FINETUNE_RESUME.name}, "
+            f"mult-3.0 balanced zoo + edge-avoidance, "
+            f"phases={FINETUNE_PHASES}, eps0={FINETUNE_EPS_START}",
+            flush=True,
+        )
+        init_mult, _, init_opp = FINETUNE_PHASES[0]
+        stats = online_finetune(
+            online, target, init_mult, init_opp,
+            demos=demos, phases=FINETUNE_PHASES,
+            eps_start=FINETUNE_EPS_START, edge_avoid=True,
+        )
+        print(
+            f"\nFinetune complete: {stats['total_episodes']} episodes, "
+            f"best score {stats['best_score']:.3f}",
+            flush=True,
+        )
+        if BEST_PATH.exists():
+            online.load_state_dict(
+                torch.load(str(BEST_PATH), map_location="cpu", weights_only=True)
+            )
+        emit_firmware_headers(online)
+        return
 
     # Run 14: resume-from-checkpoint mode. Skip Phase 0a/0b entirely
     # and pick up online training from a previous best snapshot.
@@ -695,8 +905,7 @@ def main() -> None:
             )
             print(f"Exporting BEST snapshot from {best_path_to_export.name}.",
                   flush=True)
-        _emit_dqn_header(online, FIRMWARE / "neural_net_v6_3d.h")
-        print("Wrote neural_net_v6_3d.h", flush=True)
+        emit_firmware_headers(online)
         return
 
     # Phase 0a: load cached winning datasets if present, else collect.
@@ -711,16 +920,24 @@ def main() -> None:
     if BC_HUMAN_DATASET_PATH.exists():
         sources.append(BC_HUMAN_DATASET_PATH)
 
+    obs_parts, act_parts, rew_parts = [], [], []
+    next_parts, done_parts = [], []
     if sources:
         print(
             f"\nPhase 0a: loading cached dataset(s) "
             f"{[s.name for s in sources]}",
             flush=True,
         )
-        obs_parts, act_parts, rew_parts = [], [], []
-        next_parts, done_parts = [], []
         for s in sources:
             cached = np.load(s)
+            width = cached["obs"].shape[1] if cached["obs"].ndim == 2 else 0
+            if width != NET_OBS_DIM:
+                print(
+                    f"  {s.name}: SKIPPED (obs_dim={width}, need "
+                    f"{NET_OBS_DIM}) — stale layout",
+                    flush=True,
+                )
+                continue
             obs_parts.append(cached["obs"])
             act_parts.append(cached["act"])
             rew_parts.append(cached["rew"])
@@ -730,6 +947,8 @@ def main() -> None:
                 f"  {s.name}: {cached['obs'].shape[0]} transitions",
                 flush=True,
             )
+
+    if obs_parts:
         obs_arr = np.concatenate(obs_parts, axis=0)
         act_arr = np.concatenate(act_parts, axis=0)
         rew_arr = np.concatenate(rew_parts, axis=0)
@@ -743,7 +962,7 @@ def main() -> None:
     else:
         print(
             f"\nPhase 0a: collecting winning trajectories via "
-            f"CombatPolicy. Program:",
+            f"CombatPolicy (21-D stacked, eps-coverage). Program:",
             flush=True,
         )
         for opp, mult, max_steps, n_pairs in OFFLINE_COLLECTION_PROGRAM:
@@ -786,7 +1005,10 @@ def main() -> None:
         f"mult={initial_mult}, opp={initial_opp}",
         flush=True,
     )
-    stats = online_finetune(online, target, initial_mult, initial_opp)
+    stats = online_finetune(
+        online, target, initial_mult, initial_opp,
+        demos=(obs_arr, act_arr, rew_arr, next_arr, done_arr),
+    )
     print(
         f"\nDQN run complete: {stats['total_episodes']} episodes, "
         f"best score {stats['best_score']:.3f}",
@@ -797,10 +1019,11 @@ def main() -> None:
     # argmax(Q) == argmax(A) under the dueling decomposition, so the
     # firmware only needs the advantage subnetwork — V head is dropped.
     if BEST_PATH.exists():
-        online.load_state_dict(torch.load(str(BEST_PATH)))
+        online.load_state_dict(
+            torch.load(str(BEST_PATH), map_location="cpu", weights_only=True)
+        )
         print(f"Exporting BEST snapshot from {BEST_PATH.name}.", flush=True)
-    _emit_dqn_header(online, FIRMWARE / "neural_net_v6_3d.h")
-    print("Wrote neural_net_v6_3d.h", flush=True)
+    emit_firmware_headers(online)
 
 
 def _emit_dqn_header(qnet: DuelingQNet, path: Path) -> None:
@@ -830,6 +1053,13 @@ def _emit_dqn_header(qnet: DuelingQNet, path: Path) -> None:
     h2, _ = W2.shape
     out_dim, _ = W_ADV.shape
 
+    # Legend indices for the stacked-obs comment block.
+    in_dim_k = (in_dim - ENGINEERED_DIM) // 3
+    dist_hi = (in_dim - ENGINEERED_DIM) - 1
+    eng0 = in_dim - ENGINEERED_DIM
+    eng1, eng2, eng3, eng4 = eng0 + 1, eng0 + 2, eng0 + 3, eng0 + 4
+    eng5, eng6, eng7, eng8 = eng0 + 5, eng0 + 6, eng0 + 7, eng0 + 8
+
     def fmt_f(v: float) -> str:
         return f"{v:.7e}f"
 
@@ -848,16 +1078,21 @@ def _emit_dqn_header(qnet: DuelingQNet, path: Path) -> None:
         for (l, r) in DISCRETE_ACTION_MAP
     )
 
-    # 10 self-test (obs, action_idx) pairs for firmware parity.
+    # 10 self-test (obs, action_idx) pairs for firmware parity. The input
+    # is the K-frame raw-distance stack: the leading (in_dim - 9) columns
+    # are stacked distances in [0, 1]; the trailing 9 are the engineered
+    # features with their native ranges. Generated for any K = (in_dim-9)/3.
     rng = np.random.default_rng(4242)
+    n_dist = in_dim - ENGINEERED_DIM            # 3*K distance columns
+    e = n_dist                                  # start of engineered block
     test_obs = np.zeros((10, in_dim), dtype=np.float32)
-    test_obs[:, 0:3] = rng.uniform(0.0, 1.0, size=(10, 3))
-    test_obs[:, 3] = rng.choice([-1.0, 0.0, 1.0], size=10)
-    test_obs[:, 4:6] = rng.choice([0.0, 1.0], size=(10, 2))
-    test_obs[:, 6:8] = rng.uniform(-1.0, 1.0, size=(10, 2))
-    test_obs[:, 8] = rng.uniform(0.0, 1.0, size=10)
-    test_obs[:, 9] = rng.uniform(-1.0, 1.0, size=10)
-    test_obs[:, 10:12] = rng.uniform(-1.0, 1.0, size=(10, 2))
+    test_obs[:, :n_dist] = rng.uniform(0.0, 1.0, size=(10, n_dist))
+    test_obs[:, e + 0] = rng.choice([-1.0, 0.0, 1.0], size=10)   # last_seen
+    test_obs[:, e + 1:e + 3] = rng.choice([0.0, 1.0], size=(10, 2))  # line_l/r
+    test_obs[:, e + 3:e + 5] = rng.uniform(-1.0, 1.0, size=(10, 2))  # prev_l/r
+    test_obs[:, e + 5] = rng.uniform(0.0, 1.0, size=10)         # engagement
+    test_obs[:, e + 6] = rng.uniform(-1.0, 1.0, size=10)        # yaw_rate
+    test_obs[:, e + 7:e + 9] = rng.uniform(-1.0, 1.0, size=(10, 2))  # deltas
 
     # Compute expected action_idx using a numpy mirror of the AVR fwd.
     def _np_forward(o: np.ndarray) -> int:
@@ -888,19 +1123,19 @@ def _emit_dqn_header(qnet: DuelingQNet, path: Path) -> None:
 //   action_idx = argmax(advantage)
 //   (left_motor, right_motor) = ACTION_MAP[action_idx]
 //
-// Inputs (must be normalised the same way the env does):
-//   [0] front           in [0, 1]
-//   [1] left            in [0, 1]
-//   [2] right           in [0, 1]
-//   [3] last_seen       in {{-1, 0, +1}}
-//   [4] line_l          in {{0, 1}}
-//   [5] line_r          in {{0, 1}}
-//   [6] prev_left       in [-1, +1]
-//   [7] prev_right      in [-1, +1]
-//   [8] engagement      in [0, 1]
-//   [9] yaw_rate_proxy  in [-1, +1]
-//   [10] front_ir_delta  in [-1, +1]
-//   [11] lateral_ir_delta in [-1, +1]
+// Inputs = K-frame raw-distance stack (oldest distances first) followed
+// by the 9 single-frame engineered features. For INPUT_DIM={in_dim}, K={in_dim_k}:
+//   [0 .. {dist_hi}]  stacked (front,left,right) x K, each in [0, 1]
+//                 layout: f[t-K+1],l,r, ... , f[t],l[t],r[t]
+//   [{eng0}] last_seen        in {{-1, 0, +1}}
+//   [{eng1}] line_l           in {{0, 1}}
+//   [{eng2}] line_r           in {{0, 1}}
+//   [{eng3}] prev_left        in [-1, +1]
+//   [{eng4}] prev_right       in [-1, +1]
+//   [{eng5}] engagement       in [0, 1]
+//   [{eng6}] yaw_rate_proxy   in [-1, +1]
+//   [{eng7}] front_ir_delta   in [-1, +1]
+//   [{eng8}] lateral_ir_delta in [-1, +1]
 
 #pragma once
 #include <avr/pgmspace.h>
@@ -1010,6 +1245,22 @@ inline uint8_t verify_self_test() {{
     # UTF-8 because the header includes em-dashes and other Unicode
     # punctuation in comments. AVR toolchain handles UTF-8 fine.
     path.write_text(header, encoding="utf-8")
+
+
+def emit_firmware_headers(qnet: DuelingQNet) -> None:
+    """Write the C++ header to BOTH the canonical firmware/ copy and the
+    firmware/v3_deploy/ copy the deployed sketch #includes. They were
+    previously hand-synced; emitting both keeps them byte-identical."""
+    targets = [
+        FIRMWARE / "neural_net_v6_3d.h",
+        FIRMWARE / "v3_deploy" / "neural_net_v6_3d.h",
+    ]
+    for t in targets:
+        if not t.parent.exists():
+            print(f"  skip {t} (dir missing)", flush=True)
+            continue
+        _emit_dqn_header(qnet, t)
+        print(f"Wrote {t.relative_to(HERE_TOP)}", flush=True)
 
 
 if __name__ == "__main__":
