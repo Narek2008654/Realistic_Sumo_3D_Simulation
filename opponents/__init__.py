@@ -14,12 +14,12 @@ from typing import Callable
 import numpy as np
 
 from .charger import Charger
-from .davo import Davo
 from .dodger import Dodger
 from .feinter import Feinter
 from .orbiter import Orbiter
 from .rammer import Rammer
 from .spinner import Spinner
+from .tracker import Tracker
 from .wedger import Wedger
 
 
@@ -38,7 +38,7 @@ OPPONENT_REGISTRY: dict[str, Callable[[], object]] = {
     "spinner": Spinner,
     "wedger":  Wedger,
     "charger": Charger,
-    "davo":    Davo,
+    "tracker": Tracker,
     # alg/improvment: held-out opponents — never sampled for training
     # (weight 0), only pinned via force_opponent_id for zero-shot eval.
     "feinter": Feinter,
@@ -64,7 +64,7 @@ OPPONENT_WEIGHTS: dict[str, float] = {
     "wedger":  0.17,
     "dodger":  0.13,
     "spinner": 0.12,
-    "davo":    0.15,   # alg/improvment: user's scripted tracker, now trained against
+    "tracker": 0.15,   # alg/improvment: hardcoded scripted tracker, now trained against
     "charger": 0.0,
     # Held out from training (zero-shot eval only).
     "feinter": 0.0,

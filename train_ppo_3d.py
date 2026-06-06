@@ -105,7 +105,7 @@ RESUME = os.environ.get("PPO_RESUME")
 # Robustness mode (PPO_ROBUST=1): per-episode domain randomization of opponent
 # POWER (torque mult), SPEED/intelligence (opponent DR), and HARDWARE (chassis)
 # on top of the full controller zoo — so the agent learns to fight diverse,
-# unseen robots (incl. same-chassis chargers like Davo). New output paths.
+# unseen robots (incl. same-chassis chargers like the hardcoded tracker).
 ROBUST = bool(os.environ.get("PPO_ROBUST"))
 ROBUST_MULT_RANGE = (1.0, 3.0)
 if RESUME:

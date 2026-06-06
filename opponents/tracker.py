@@ -1,4 +1,5 @@
-"""Davo: the user's scripted tracker robot (davo_sirad.ino) as an opponent.
+"""Tracker: a hardcoded scripted tracker robot (a real Arduino sketch) as an
+opponent.
 
 Distinct from Charger: the real robot has only THREE forward range sensors
 (right / middle / left) and NO side sensors, so it is blind to its own
@@ -19,7 +20,7 @@ from __future__ import annotations
 from .base import OpponentController
 
 
-class Davo(OpponentController):
+class Tracker(OpponentController):
     FULL = 83.78           # full speed (clipped by _novamax_caps)
     FRONT_HOLD_TICKS = 6   # sticky front pursuit (~sketch CONFIRM_MISSES)
 

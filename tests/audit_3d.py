@@ -1060,7 +1060,7 @@ check("mult DR sets the per-episode torque mult",
 _md.close()
 
 # enemy_as_agent spawns the opponent on the agent chassis and still runs.
-_ea = make_env(enemy_as_agent=True, force_opponent_id="davo")
+_ea = make_env(enemy_as_agent=True, force_opponent_id="tracker")
 _ea.reset(seed=1)
 _ea.step(8)
 check("enemy_as_agent env steps without error", _ea.enemy_id is not None)

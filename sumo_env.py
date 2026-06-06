@@ -1557,9 +1557,9 @@ class MiniSumoEnv(gym.Env):
         # INITIAL_CHARGE_TICKS == 0, so the loop runs 0 iterations). It
         # only runs if INITIAL_CHARGE_MS is set > 0, in which case red
         # drives both wheels full forward while blue holds still (zero
-        # target velocity). davo_sirad's hysteresis only ticks while we're
-        # calling _apply_enemy_control, which we skip here, so it just
-        # observes the runup.
+        # target velocity). The opponent controller's hysteresis only ticks
+        # while we're calling _apply_enemy_control, which we skip here, so it
+        # just observes the runup.
         for _ in range(INITIAL_CHARGE_TICKS):
             if not p.isConnected(self._client_id):
                 break

@@ -15,12 +15,13 @@ DQN** ("Stage-A") and a stronger **discrete PPO** (the current deploy model).
 ## Demo
 
 The deployed policy (robust PPO) pushing opponents off the 70 cm dohyo at
-mult 3.0 — **red = agent, blue = opponent** (rendered headless with PyBullet's
-tiny renderer):
+mult 3.0 — **red = agent, blue = opponent** (PyBullet OpenGL renderer):
 
-| vs NovaMax (boss) | vs Davo (the user's robot) | vs Dodger (evasive) |
+| vs NovaMax (boss) | vs Tracker (hardcoded) | vs Charger |
 |---|---|---|
-| ![agent vs novamax](docs/media/demo_novamax.gif) | ![agent vs davo](docs/media/demo_davo.gif) | ![agent vs dodger](docs/media/demo_dodger.gif) |
+| ![vs novamax](docs/media/demo_novamax.gif) | ![vs tracker](docs/media/demo_tracker.gif) | ![vs charger](docs/media/demo_charger.gif) |
+| **vs Dodger (evasive)** | **vs Wedger** | **vs Orbiter (held-out)** |
+| ![vs dodger](docs/media/demo_dodger.gif) | ![vs wedger](docs/media/demo_wedger.gif) | ![vs orbiter](docs/media/demo_orbiter.gif) |
 
 ## What's in the repo
 
@@ -34,7 +35,7 @@ train_ppo_3d.py       discrete PPO: BC warm-start, GAE, curriculum, resume/zero-
                       robust modes, watch-every-100k
 export_weights.py     PyTorch state-dict -> PROGMEM C++ header
 opponents/            7 zoo controllers (dodger, spinner, rammer, wedger, novamax,
-                      charger, davo) + 2 held-out (feinter, orbiter)
+                      charger, tracker) + 2 held-out (feinter, orbiter)
 assets/               robot.urdf, novamax.urdf, STL meshes
 scripts/              watch_3d, watch_gauntlet, play_vs_dqn_3d, eval_best,
                       agent_vs_agent (self-play head-to-head), human_play
@@ -145,7 +146,7 @@ python scripts/agent_vs_agent.py --a checkpoints/ppo_robust_best.pt --b checkpoi
 | seen-zoo mean | 51 % | **73 %** |
 | novamax | 52 % | **70 %** |
 | charger | — | 70 % |
-| davo (the user's scripted robot) | — | 87 % (67 % same-chassis) |
+| tracker (hardcoded scripted robot) | — | 87 % (67 % same-chassis) |
 | held-out (unseen) mean | ~48 % | **78 %** |
 | self-out rate | ~41 % | **~18 %** |
 

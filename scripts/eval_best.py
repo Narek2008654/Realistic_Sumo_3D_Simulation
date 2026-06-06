@@ -32,7 +32,7 @@ from opponents import HELD_OUT_OPPONENT_IDS
 # Trained-against ("seen") zoo vs the held-out opponents used to measure
 # zero-shot generalization. Eval runs with a clean env (no opponent/hard
 # sensor DR) so win-rates are reproducible and comparable to the baseline.
-SEEN_OPPONENTS = ("dodger", "spinner", "rammer", "wedger", "novamax", "charger", "davo")
+SEEN_OPPONENTS = ("dodger", "spinner", "rammer", "wedger", "novamax", "charger", "tracker")
 HELD_OUT = HELD_OUT_OPPONENT_IDS
 
 

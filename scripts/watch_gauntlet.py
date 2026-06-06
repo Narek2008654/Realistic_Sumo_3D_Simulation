@@ -24,7 +24,7 @@ import pybullet as p
 from train_dqn_3d import DuelingQNet, build_env
 
 OPPONENTS = ["dodger", "spinner", "rammer", "wedger", "novamax", "charger",
-             "davo", "feinter", "orbiter"]
+             "tracker", "feinter", "orbiter"]
 
 
 def main():

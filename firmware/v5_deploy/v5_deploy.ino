@@ -1,9 +1,9 @@
 // v5_deploy.ino — Mini Sumo Arduino Nano, runs ppo_robust_best.pt
 // (the 21-D discrete-PPO model: BC warm start + curriculum + zero-entropy
-// sharpening + a finetune on tracking/still/backward rewards, the Davo
-// opponent, and per-episode domain randomization of opponent power / speed /
-// hardware. Branch pol/ppo). At mult 3.0: ~73% seen, 70% novamax, 87% vs
-// Davo, 78% held-out, meeting the 65%-overall / 55%-novamax bar with the
+// sharpening + a finetune on tracking/still/backward rewards, a hardcoded
+// tracker opponent, and per-episode domain randomization of opponent power /
+// speed / hardware. Branch pol/ppo). At mult 3.0: ~73% seen, 70% novamax, 87%
+// vs the tracker, 78% held-out, meeting the 65%-overall / 55%-novamax bar with
 // lowest self-out rate of any model. The PPO actor head argmax = the action,
 // so it uses the same discrete export path as the DQN. NOTE: trained WITH the
 // hardcoded action overrides (safety, opening charge, spawn guard,
