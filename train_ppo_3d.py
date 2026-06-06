@@ -50,9 +50,9 @@ NET_ARCH = (32, 32)            # Nano-deployable, matches the DQN line
 GAMMA = 0.99
 GAE_LAMBDA = 0.95
 CLIP = 0.2
-ENT_COEF = 0.01                # entropy bonus (keeps exploration up early)
+ENT_COEF = 0.02                # entropy bonus (resist premature collapse)
 VF_COEF = 0.5
-LR = 2.5e-4
+LR = 1e-4                      # gentle: the actor starts from a good BC policy
 EPOCHS = 4                     # PPO epochs per rollout
 MINIBATCH = 256
 ROLLOUT = 2048                 # env steps per policy update
@@ -60,6 +60,13 @@ TOTAL_STEPS = 1_000_000
 MAX_GRAD_NORM = 0.5
 BC_EPOCHS = 10                 # actor-only behavior-cloning warm start
 LOG_EVERY = 5_000
+# Anti-collapse (a cold critic + a good BC actor => garbage early advantages
+# that wreck the actor — observed as WR 30%->7% and entropy 0.96->0.1).
+# (1) Warm the critic FIRST with the actor frozen, so advantages are sane
+#     before the policy moves. (2) Early-stop each update at a KL budget so a
+#     single rollout can't take a destructive step.
+CRITIC_WARMUP_UPDATES = 8      # value-head-only updates before full PPO
+TARGET_KL = 0.03               # per-update KL early-stop threshold
 
 # Curriculum: ramp only the physics mult; full zoo every episode throughout.
 MULT_PHASES = ((0.7, 100_000), (1.0, 200_000), (1.5, 200_000),
@@ -75,6 +82,7 @@ if SMOKE:
     BC_EPOCHS = 1
     MULT_PHASES = ((1.0, 4_000), (1.5, 4_000))
     LOG_EVERY = 1_000
+    CRITIC_WARMUP_UPDATES = 2
 
 
 # ---------------------------------------------------------------------------
@@ -212,6 +220,10 @@ def train():
     env.unwrapped.novamax_torque_mult = float(MULT_PHASES[0][0])
     t0 = time.time()
     last_log = 0
+    update_idx = 0
+    last_entropy = 0.0
+    print(f"critic warmup: {CRITIC_WARMUP_UPDATES} value-only updates "
+          f"(~{CRITIC_WARMUP_UPDATES * ROLLOUT} steps) before full PPO", flush=True)
 
     while step < TOTAL_STEPS:
         # advance the mult curriculum
@@ -257,24 +269,53 @@ def train():
         adv_t = torch.as_tensor(adv, dtype=torch.float32)
         ret_t = torch.as_tensor(returns, dtype=torch.float32)
 
-        # ---- PPO update ----
+        # ---- update ----
         n = len(b_obs)
-        for _ in range(EPOCHS):
-            perm = np.random.permutation(n)
-            for s in range(0, n, MINIBATCH):
-                mb = perm[s:s + MINIBATCH]
-                new_logp, entropy, value = net.evaluate(obs_t[mb], act_t[mb])
-                ratio = torch.exp(new_logp - old_logp_t[mb])
-                a_mb = adv_t[mb]
-                surr1 = ratio * a_mb
-                surr2 = torch.clamp(ratio, 1.0 - CLIP, 1.0 + CLIP) * a_mb
-                policy_loss = -torch.min(surr1, surr2).mean()
-                value_loss = nn.functional.mse_loss(value, ret_t[mb])
-                loss = policy_loss + VF_COEF * value_loss - ENT_COEF * entropy.mean()
-                opt.zero_grad()
-                loss.backward()
-                nn.utils.clip_grad_norm_(net.parameters(), MAX_GRAD_NORM)
-                opt.step()
+        if update_idx < CRITIC_WARMUP_UPDATES:
+            # Critic warm-up: train ONLY the value head (trunk + actor frozen)
+            # so the BC policy is preserved while V learns sane return targets.
+            for prm in net.trunk.parameters():          prm.requires_grad_(False)
+            for prm in net.advantage_head.parameters(): prm.requires_grad_(False)
+            for _ in range(EPOCHS):
+                perm = np.random.permutation(n)
+                for s in range(0, n, MINIBATCH):
+                    mb = perm[s:s + MINIBATCH]
+                    _, _, value = net.evaluate(obs_t[mb], act_t[mb])
+                    value_loss = nn.functional.mse_loss(value, ret_t[mb])
+                    opt.zero_grad()
+                    value_loss.backward()
+                    opt.step()
+            for prm in net.parameters(): prm.requires_grad_(True)
+            with torch.no_grad():
+                _, ent, _ = net.evaluate(obs_t[:MINIBATCH], act_t[:MINIBATCH])
+                last_entropy = float(ent.mean())
+        else:
+            # Full PPO with a per-update KL early-stop so one rollout cannot
+            # take a destructive step.
+            for _ in range(EPOCHS):
+                perm = np.random.permutation(n)
+                approx_kl = 0.0
+                for s in range(0, n, MINIBATCH):
+                    mb = perm[s:s + MINIBATCH]
+                    new_logp, entropy, value = net.evaluate(obs_t[mb], act_t[mb])
+                    logratio = new_logp - old_logp_t[mb]
+                    ratio = torch.exp(logratio)
+                    a_mb = adv_t[mb]
+                    surr1 = ratio * a_mb
+                    surr2 = torch.clamp(ratio, 1.0 - CLIP, 1.0 + CLIP) * a_mb
+                    policy_loss = -torch.min(surr1, surr2).mean()
+                    value_loss = nn.functional.mse_loss(value, ret_t[mb])
+                    loss = policy_loss + VF_COEF * value_loss - ENT_COEF * entropy.mean()
+                    opt.zero_grad()
+                    loss.backward()
+                    nn.utils.clip_grad_norm_(net.parameters(), MAX_GRAD_NORM)
+                    opt.step()
+                    last_entropy = float(entropy.mean())
+                    with torch.no_grad():
+                        approx_kl = float(((ratio - 1) - logratio).mean())
+                if approx_kl > TARGET_KL:
+                    break
+        update_idx += 1
 
         # ---- log + best checkpoint ----
         if step - last_log >= LOG_EVERY:
@@ -288,8 +329,9 @@ def train():
                 save_checkpoint_atomic(net.state_dict(), BEST_PATH)
                 marker = "  *BEST*"
             fps = step / max(1e-6, time.time() - t0)
+            phase_tag = " [warmup]" if update_idx <= CRITIC_WARMUP_UPDATES else ""
             print(f"step {step:7d}  ep={episodes:5d}  wr({len(recent)})={wr:.2%}  "
-                  f"ent={float(entropy.mean()):.3f}  fps={fps:.1f}{marker}", flush=True)
+                  f"ent={last_entropy:.3f}  fps={fps:.1f}{phase_tag}{marker}", flush=True)
             opp_strs = [f"{o}={sum(v)/max(1,len(v)):.0%}({len(v)})"
                         for o, v in sorted(per_opp.items())]
             if opp_strs:
