@@ -39,6 +39,9 @@ from sumo_env import (
 
 # env obs-state attributes swapped per body so the env's own obs methods
 # build a faithful observation for whichever robot we point them at.
+# MAINTENANCE: if MiniSumoEnv adds new obs-building state, add it here too.
+# The startup faithfulness gate (drift > 1e-5 abort in main) will catch any
+# omission, but only at runtime.
 SWAP = ["last_seen_dir", "_steps_since_last_hit", "_prev_action",
         "_engagement_timer", "_yaw_rate_proxy", "_prev_front_norm",
         "_prev_min_lateral"]

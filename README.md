@@ -115,7 +115,7 @@ train.bat
 #   PPO_RESUME=<ckpt>            continue at fixed mult 3.0
 #   PPO_ENT0=1                   zero-entropy sharpening
 #   PPO_ROBUST=1                 + opponent power/speed/hardware DR
-set PPO_RESUME=checkpoints/ppo_ent0_best.pt && set PPO_ROBUST=1 && python -u train_ppo_3d.py
+set PPO_RESUME=checkpoints/ppo_robust_best.pt && set PPO_ROBUST=1 && python -u train_ppo_3d.py
 
 # Headless eval vs the zoo + held-out (per-opponent WR + self-out breakdown):
 python scripts/eval_best.py --ckpt checkpoints/ppo_robust_best.pt --n-eps 30 --mult 3.0 --spawn-guard

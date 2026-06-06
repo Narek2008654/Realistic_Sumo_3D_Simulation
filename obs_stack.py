@@ -12,8 +12,9 @@ features single-frame. That hands the network the short distance
 *trajectory* (so it can read a fast opponent's pivot rhythm and cut it
 off) at minimal cost.
 
-Layout (the single source of truth — the Arduino firmware mirrors this
-byte-for-byte in firmware/v3_deploy/v3_deploy.ino):
+Layout (the single source of truth — the 21-D Arduino firmware mirrors this
+byte-for-byte via a K-frame ring buffer in firmware/v5_deploy/v5_deploy.ino,
+and firmware/v4_deploy for the DQN Stage-A model):
 
     [ d_{t-K+1} , ... , d_{t-1} , d_t , engineered_9 ]   (oldest distances first)
 
@@ -99,6 +100,8 @@ def stack_from_trajectory(
 
     Used as a fallback to re-window a 12-D dataset; the primary path
     collects through ``RawDistanceStack`` and stores 21-D obs natively.
+
+    O(N*K) pure-Python — offline re-windowing only; never call on the hot path.
     """
     obs = np.asarray(obs, dtype=np.float32)
     dones = np.asarray(dones).astype(bool)

@@ -292,6 +292,7 @@ def train():
     last_watch = 0
     update_idx = 0
     last_entropy = 0.0
+    last_kl = 0.0
     print(f"critic warmup: {CRITIC_WARMUP_UPDATES} value-only updates "
           f"(~{CRITIC_WARMUP_UPDATES * ROLLOUT} steps) before full PPO", flush=True)
 
@@ -382,9 +383,13 @@ def train():
                     opt.step()
                     last_entropy = float(entropy.mean())
                     with torch.no_grad():
-                        approx_kl = float(((ratio - 1) - logratio).mean())
+                        # abs(): (r-1)-log(r) is >=0 in theory but float error
+                        # can make it slightly negative, which would defeat the
+                        # early-stop comparison against TARGET_KL.
+                        approx_kl = float(((ratio - 1) - logratio).mean().abs())
                 if approx_kl > TARGET_KL:
                     break
+            last_kl = approx_kl
         update_idx += 1
 
         # ---- log + best checkpoint ----
@@ -401,7 +406,8 @@ def train():
             fps = step / max(1e-6, time.time() - t0)
             phase_tag = " [warmup]" if update_idx <= CRITIC_WARMUP_UPDATES else ""
             print(f"step {step:7d}  ep={episodes:5d}  wr({len(recent)})={wr:.2%}  "
-                  f"ent={last_entropy:.3f}  fps={fps:.1f}{phase_tag}{marker}", flush=True)
+                  f"ent={last_entropy:.3f}  kl={last_kl:.4f}  "
+                  f"fps={fps:.1f}{phase_tag}{marker}", flush=True)
             opp_strs = [f"{o}={sum(v)/max(1,len(v)):.0%}({len(v)})"
                         for o, v in sorted(per_opp.items())]
             if opp_strs:
