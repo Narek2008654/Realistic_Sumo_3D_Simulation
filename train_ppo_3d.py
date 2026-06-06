@@ -34,6 +34,9 @@ import torch.nn as nn
 import numpy as np
 import random
 import time
+import sys
+import subprocess
+import pathlib
 from collections import deque
 from torch.distributions import Categorical
 
@@ -75,6 +78,14 @@ MULT_PHASES = ((0.7, 100_000), (1.0, 200_000), (1.5, 200_000),
 BEST_PATH = CHECKPOINTS / "ppo_stack_best.pt"
 FINAL_PATH = CHECKPOINTS / "ppo_stack_final.pt"
 
+# Human-in-the-loop: every WATCH_EVERY steps, pop a GUI window playing the
+# CURRENT policy at the current curriculum mult (non-blocking — training
+# continues). Lets the user eyeball behaviour/gaps as it learns.
+WATCH_EVERY = 100_000
+WATCH_EPISODES = 6
+WATCH_PATH = CHECKPOINTS / "ppo_stack_watch.pt"
+WATCH_SCRIPT = pathlib.Path(__file__).resolve().parent / "scripts" / "watch_3d.py"
+
 SMOKE = bool(os.environ.get("PPO_SMOKE"))
 if SMOKE:
     ROLLOUT = 512
@@ -83,6 +94,7 @@ if SMOKE:
     MULT_PHASES = ((1.0, 4_000), (1.5, 4_000))
     LOG_EVERY = 1_000
     CRITIC_WARMUP_UPDATES = 2
+    WATCH_EVERY = 10**9            # no GUI pop-ups during smoke tests
 
 
 # ---------------------------------------------------------------------------
@@ -179,6 +191,23 @@ def compute_gae(rewards, values, dones, last_value, gamma=GAMMA, lam=GAE_LAMBDA)
     return adv, returns
 
 
+def launch_watch(net: "ActorCritic", mult: float):
+    """Save the current policy and pop a non-blocking GUI window playing it,
+    so a human can watch the model every WATCH_EVERY steps. watch_3d.py loads
+    the checkpoint as a DuelingQNet (shared layout) and acts greedily."""
+    save_checkpoint_atomic(net.state_dict(), WATCH_PATH)
+    try:
+        subprocess.Popen(
+            [sys.executable, str(WATCH_SCRIPT), "--ckpt", str(WATCH_PATH),
+             "--mult", str(mult), "--n-episodes", str(WATCH_EPISODES)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        print(f"  [watch] GUI window on current policy "
+              f"(mult={mult}, {WATCH_EPISODES} eps)", flush=True)
+    except OSError as e:
+        print(f"  [watch] launch failed: {e}", flush=True)
+
+
 # ---------------------------------------------------------------------------
 # Training
 # ---------------------------------------------------------------------------
@@ -220,6 +249,7 @@ def train():
     env.unwrapped.novamax_torque_mult = float(MULT_PHASES[0][0])
     t0 = time.time()
     last_log = 0
+    last_watch = 0
     update_idx = 0
     last_entropy = 0.0
     print(f"critic warmup: {CRITIC_WARMUP_UPDATES} value-only updates "
@@ -274,7 +304,7 @@ def train():
         if update_idx < CRITIC_WARMUP_UPDATES:
             # Critic warm-up: train ONLY the value head (trunk + actor frozen)
             # so the BC policy is preserved while V learns sane return targets.
-            for prm in net.trunk.parameters():          prm.requires_grad_(False)
+            for prm in net.trunk.parameters(): prm.requires_grad_(False)
             for prm in net.advantage_head.parameters(): prm.requires_grad_(False)
             for _ in range(EPOCHS):
                 perm = np.random.permutation(n)
@@ -336,6 +366,11 @@ def train():
                         for o, v in sorted(per_opp.items())]
             if opp_strs:
                 print("  per_opp: " + "  ".join(opp_strs), flush=True)
+
+        # human-in-the-loop: pop a GUI window on the current policy
+        if step - last_watch >= WATCH_EVERY:
+            last_watch = step
+            launch_watch(net, MULT_PHASES[mult_idx][0])
 
     save_checkpoint_atomic(net.state_dict(), FINAL_PATH)
     print(f"\nPPO done: {episodes} episodes, best score {best_score:.3f}", flush=True)
