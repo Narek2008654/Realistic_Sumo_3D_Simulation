@@ -12,6 +12,16 @@ DQN** ("Stage-A") and a stronger **discrete PPO** (the current deploy model).
 ![PyTorch](https://img.shields.io/badge/RL-DQN%20%2B%20PPO-EE4C2C.svg)
 ![Arduino](https://img.shields.io/badge/deploy-Arduino%20Nano-00979D.svg)
 
+## Demo
+
+The deployed policy (robust PPO) pushing opponents off the 70 cm dohyo at
+mult 3.0 — **red = agent, blue = opponent** (rendered headless with PyBullet's
+tiny renderer):
+
+| vs NovaMax (boss) | vs Davo (the user's robot) | vs Dodger (evasive) |
+|---|---|---|
+| ![agent vs novamax](docs/media/demo_novamax.gif) | ![agent vs davo](docs/media/demo_davo.gif) | ![agent vs dodger](docs/media/demo_dodger.gif) |
+
 ## What's in the repo
 
 ```
