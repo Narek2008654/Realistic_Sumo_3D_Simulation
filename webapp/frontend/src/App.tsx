@@ -4,6 +4,7 @@ import ComingSoon from './pages/ComingSoon';
 import Hardware from './pages/Hardware';
 import Models from './pages/Models';
 import Robots from './pages/Robots';
+import Train from './pages/Train';
 
 export default function App() {
   return (
@@ -13,15 +14,7 @@ export default function App() {
         <Route path="/hardware" element={<Hardware />} />
         <Route path="/robots" element={<Robots />} />
         <Route path="/models" element={<Models />} />
-        <Route
-          path="/train"
-          element={
-            <ComingSoon
-              section="Training"
-              blurb="Configure a run, pull recommended hyper-parameters for the current hardware contract, then watch reward components stream into a live dashboard with inline replay."
-            />
-          }
-        />
+        <Route path="/train" element={<Train />} />
         <Route
           path="/arena"
           element={

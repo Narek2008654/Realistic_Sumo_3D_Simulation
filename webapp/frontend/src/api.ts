@@ -5,8 +5,14 @@ import type {
   Geometry,
   HardwareSpec,
   ModelCard,
+  RecommendResult,
   RobotRecord,
   RobotSummary,
+  StartTrainBody,
+  TrainJobSummary,
+  TrainMode,
+  TrainStatus,
+  Trajectory,
   ValidateResult,
 } from './types';
 
@@ -102,4 +108,33 @@ export const api = {
 
   deleteRobot: (id: string) =>
     request<{ deleted: boolean }>(`/api/robots/${id}`, { method: 'DELETE' }),
+
+  // ---- Training ------------------------------------------------------------
+  // Start a job. Throws ApiError(409) if one is already running.
+  startTrain: (body: StartTrainBody) =>
+    request<{ job_id: string }>('/api/train', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  // Status of the active job (no id) or a specific job by id.
+  trainStatus: (jobId?: string) =>
+    request<TrainStatus>(
+      jobId ? `/api/train/status/${jobId}` : '/api/train/status',
+    ),
+
+  stopTrain: () =>
+    request<{ stopped: boolean }>('/api/train/stop', { method: 'POST' }),
+
+  trainJobs: () => request<TrainJobSummary[]>('/api/train/jobs'),
+
+  recommendTrain: (hardware_spec: HardwareSpec | null, mode: TrainMode) =>
+    request<RecommendResult>('/api/train/recommend', {
+      method: 'POST',
+      body: JSON.stringify({ hardware_spec, mode }),
+    }),
+
+  // Trajectory JSON for a job's checkpoint step (kinematics only).
+  getTrajectory: (job: string, step: number | string) =>
+    request<Trajectory>(`/api/trajectories/${job}/${step}`),
 };

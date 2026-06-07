@@ -144,3 +144,128 @@ export interface ModelCard {
   metrics: ModelMetrics | null;
   created_at: string;
 }
+
+// ---- Training ---------------------------------------------------------------
+
+export type TrainAlgo = 'dqn' | 'ppo';
+export type TrainMode = 'scratch' | 'finetune';
+
+export interface StartTrainBody {
+  robot_id?: string;
+  hardware_spec?: HardwareSpec;
+  algo: TrainAlgo;
+  mode: TrainMode;
+  base_model_id?: string;
+  total_steps?: number;
+  eval_every?: number;
+  opponent_weights?: Record<string, number> | null;
+  smoke?: boolean;
+  seed?: number;
+}
+
+export interface TrainHyperparams {
+  lr: number;
+  gamma: number;
+  batch_size: number;
+  eps_start: number;
+  eps_end: number;
+}
+
+export interface RecommendResult {
+  algo: TrainAlgo;
+  total_steps: number;
+  eval_every: number;
+  net_arch: [number, number];
+  start_mult: number;
+  hyperparams: TrainHyperparams;
+  est_minutes: number;
+}
+
+/** Per-opponent eval block from scripts.eval_best.run_eval. */
+export interface OpponentEval {
+  wins: number;
+  losses: number;
+  timeouts?: number;
+  self_out: number;
+  push_loss?: number;
+  mutual_out?: number;
+  n: number;
+  mean_ep_len: number;
+  [key: string]: number | undefined;
+}
+
+/** Aggregated eval metrics carried by a checkpoint event. */
+export interface CheckpointEval {
+  wins: number;
+  losses: number;
+  self_out: number;
+  n: number;
+  wr: number;
+  mean_ep_len: number;
+  per_opponent?: Record<string, OpponentEval>;
+  mult?: number;
+}
+
+export interface CheckpointEvent {
+  t: 'checkpoint';
+  step: number;
+  snapshot: string;
+  eval: CheckpointEval;
+  trajectory: string;
+}
+
+export interface TrainEvent {
+  t: string;
+  step?: number;
+  [key: string]: unknown;
+}
+
+export type TrainState =
+  | 'idle'
+  | 'running'
+  | 'done'
+  | 'error'
+  | 'stopped'
+  | 'unknown';
+
+export interface TrainStatus {
+  state: TrainState;
+  running: boolean;
+  config: Record<string, unknown> | null;
+  events: TrainEvent[];
+  latest_checkpoint: CheckpointEvent | null;
+  job_id: string | null;
+}
+
+export interface TrainJobSummary {
+  id: string;
+  algo: string | null;
+  mode: string | null;
+  smoke: boolean;
+  started_at: string | null;
+  running: boolean;
+}
+
+// ---- Trajectory replay ------------------------------------------------------
+
+export interface FramePose {
+  p: Vec3;
+  q: [number, number, number, number];
+}
+
+export interface TrajectoryFrame {
+  agent: FramePose;
+  enemy: FramePose;
+}
+
+export interface TrajectoryOutcome {
+  winner: 'agent' | 'enemy' | null;
+  reason: string;
+}
+
+export interface Trajectory {
+  dt: number;
+  dohyo_radius: number;
+  frames: TrajectoryFrame[];
+  outcome: TrajectoryOutcome;
+}
