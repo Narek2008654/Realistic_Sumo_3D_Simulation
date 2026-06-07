@@ -59,20 +59,32 @@ class RawDistanceStack(gym.ObservationWrapper):
         if int(k) < 1:
             raise ValueError(f"stack depth k must be >= 1, got {k!r}")
         self.k = int(k)
+
+        # E1b: derive the distance / base widths from the wrapped env's
+        # HardwareSpec when present (n_distance raw channels repeated K times
+        # + the single-frame engineered tail). Falls back to the legacy
+        # 3-distance / 12-D layout if the env exposes no spec, so the default
+        # robot is unchanged.
+        spec = getattr(env.unwrapped, "hw_spec", None)
+        self._n_dist = getattr(spec, "n_distance", None) or DIST_DIM
         base = env.observation_space
-        if base.shape != (BASE_OBS_DIM,):
+        self._base_dim = (
+            getattr(spec, "base_obs_dim", None) or int(base.shape[0])
+        )
+        if base.shape != (self._base_dim,):
             raise ValueError(
-                f"RawDistanceStack expects a {BASE_OBS_DIM}-D base obs, "
+                f"RawDistanceStack expects a {self._base_dim}-D base obs, "
                 f"got shape {base.shape}"
             )
+        stacked = self._n_dist * self.k + (self._base_dim - self._n_dist)
         self.observation_space = spaces.Box(
-            low=-1.0, high=1.0, shape=(stacked_dim(self.k),), dtype=np.float32,
+            low=-1.0, high=1.0, shape=(stacked,), dtype=np.float32,
         )
         self._ring: deque[np.ndarray] = deque(maxlen=self.k)
 
     def reset(self, **kwargs):
         obs, info = self.env.reset(**kwargs)
-        dist = np.asarray(obs[:DIST_DIM], dtype=np.float32)
+        dist = np.asarray(obs[:self._n_dist], dtype=np.float32)
         self._ring.clear()
         for _ in range(self.k):
             self._ring.append(dist.copy())
@@ -80,11 +92,11 @@ class RawDistanceStack(gym.ObservationWrapper):
 
     def observation(self, obs: np.ndarray) -> np.ndarray:
         # Called by ObservationWrapper.step() once per env step.
-        self._ring.append(np.asarray(obs[:DIST_DIM], dtype=np.float32))
+        self._ring.append(np.asarray(obs[:self._n_dist], dtype=np.float32))
         return self._assemble(obs)
 
     def _assemble(self, obs: np.ndarray) -> np.ndarray:
-        engineered = np.asarray(obs[DIST_DIM:BASE_OBS_DIM], dtype=np.float32)
+        engineered = np.asarray(obs[self._n_dist:self._base_dim], dtype=np.float32)
         return np.concatenate(list(self._ring) + [engineered]).astype(np.float32)
 
 

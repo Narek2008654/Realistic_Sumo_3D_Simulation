@@ -245,9 +245,17 @@ if SMOKE and FINETUNE:
 # ---------------------------------------------------------------------------
 def build_env(**kwargs) -> RawDistanceStack:
     """Construct the discrete-action sumo env wrapped in the K-frame
-    raw-distance stack. All policy-facing code sees the stacked obs."""
+    raw-distance stack. All policy-facing code sees the stacked obs.
+
+    E1b: an optional ``hardware_spec`` kwarg flows through to MiniSumoEnv,
+    which drives sensing + obs assembly off it. The stack depth follows the
+    spec's ``stack_k`` when a spec is supplied; otherwise it stays at the
+    module default ``STACK_K`` so the default robot is byte-identical.
+    """
     kwargs.setdefault("action_space_kind", "discrete")
-    return RawDistanceStack(MiniSumoEnv(**kwargs), k=STACK_K)
+    env = MiniSumoEnv(**kwargs)
+    k = env.hw_spec.stack_k if kwargs.get("hardware_spec") is not None else STACK_K
+    return RawDistanceStack(env, k=k)
 
 
 def save_checkpoint_atomic(state_dict, path: Path) -> None:

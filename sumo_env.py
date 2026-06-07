@@ -34,6 +34,8 @@ import pybullet as p
 import pybullet_data
 from gymnasium import spaces
 
+from webapp.shared.hardware_spec import HardwareSpec
+
 
 # ---------------------------------------------------------------------------
 # World / robot constants (meters / seconds).
@@ -592,8 +594,16 @@ class MiniSumoEnv(gym.Env):
         opponent_dr: bool = False,
         sensor_hard_dr: bool = False,
         opponent_weights: Optional[dict] = None,
+        hardware_spec: Optional[HardwareSpec] = None,
     ) -> None:
         super().__init__()
+        # E1b: the robot's sensing + observation contract is driven by a
+        # HardwareSpec. None => HardwareSpec.default(), which encodes TODAY's
+        # robot byte-identically (3 ToF rays, 2 line sensors, 9 engineered
+        # features). Stored as `self.hw_spec` (NOT `self.spec`, which is
+        # Gymnasium's reserved EnvSpec slot — shadowing it breaks str(env),
+        # gym.make registration, and Wrapper.spec).
+        self.hw_spec = hardware_spec if hardware_spec is not None else HardwareSpec.default()
         # alg/improvment: dense edge-avoidance shaping to cut self-outs
         # (the dominant loss mode at high mult). Off by default.
         self.edge_avoid_reward = bool(edge_avoid_reward)
@@ -681,8 +691,10 @@ class MiniSumoEnv(gym.Env):
         # (negative) or escaping (positive) and at what rate, which the
         # 10D-instantaneous obs cannot express. Critical for predicting
         # Dodger-style pivot evasion.
+        # E1b: single-frame obs width = spec.base_obs_dim
+        # (n_distance + len(engineered)). Default spec => 3 + 9 = 12.
         self.observation_space = spaces.Box(
-            low=-1.0, high=1.0, shape=(12,), dtype=np.float32,
+            low=-1.0, high=1.0, shape=(self.hw_spec.base_obs_dim,), dtype=np.float32,
         )
 
         self.robot_id: Optional[int] = None
@@ -722,7 +734,9 @@ class MiniSumoEnv(gym.Env):
         self._enemy_tracking_gain: float = 1.0
         self._enemy_action_latency: int = 1
         # alg/improvment: per-episode hard-sensor-DR state (defaults = none).
-        self._tof_calib_bias: np.ndarray = np.zeros(3, dtype=np.float64)
+        self._tof_calib_bias: np.ndarray = np.zeros(
+            self.hw_spec.n_distance, dtype=np.float64,
+        )
         self._tof_stuck_channel: Optional[int] = None
         self._tof_stuck_last: Optional[float] = None
         self._line_flip_prob: float = 0.0
@@ -979,31 +993,22 @@ class MiniSumoEnv(gym.Env):
         return max_rad * self._velocity_factor, max_force
 
     def _raw_distances(self) -> list[Optional[float]]:
-        # All three VL53L1X sensors mounted near the front of the chassis
-        # (x ≈ 0.045, just behind the wedge tip), pointing forward in a
-        # 60° cone: the front sensor straight ahead, the side sensors
-        # angled 30° outward to the left and right.
-        sensor_x = 0.045
-        sensor_y = 0.0
-        cos30 = math.cos(math.radians(30.0))
-        sin30 = math.sin(math.radians(30.0))
-        readings: list[Optional[float]] = [
-            # front: yaw + 0
-            self._ray_from_body_point(
-                self.robot_id, sensor_x, sensor_y,
-                1.0, 0.0, ENEMY_FAR_DIST,
-            ),
-            # left: yaw + 30°
-            self._ray_from_body_point(
-                self.robot_id, sensor_x, sensor_y,
-                cos30, sin30, ENEMY_FAR_DIST,
-            ),
-            # right: yaw - 30°
-            self._ray_from_body_point(
-                self.robot_id, sensor_x, sensor_y,
-                cos30, -sin30, ENEMY_FAR_DIST,
-            ),
-        ]
+        # E1b: cast one ray per spec.distance_sensors entry. Each sensor's
+        # body-frame mount (mount_xyz x,y) and ray yaw (angle_rad, +CCW from
+        # +X) drive a _ray_from_body_point call; the ray direction is the
+        # unit (cos angle, sin angle). The default spec reproduces the legacy
+        # 3-ray cone exactly: front (yaw+0), left (yaw+30°), right (yaw-30°),
+        # all mounted at x≈0.045 just behind the wedge tip, range ENEMY_FAR_DIST.
+        readings: list[Optional[float]] = []
+        for sensor in self.hw_spec.distance_sensors:
+            mx, my, _mz = sensor.mount_xyz
+            dir_x = math.cos(sensor.angle_rad)
+            dir_y = math.sin(sensor.angle_rad)
+            readings.append(
+                self._ray_from_body_point(
+                    self.robot_id, mx, my, dir_x, dir_y, sensor.range_m,
+                )
+            )
         if self._disabled_sensor is not None:
             readings[self._disabled_sensor] = None
         # Per-step ToF noise + dropout (Step 4 domain randomization). The
@@ -1096,64 +1101,98 @@ class MiniSumoEnv(gym.Env):
                 return
         self.last_seen_dir = (0.0, -1.0, 1.0)[winner]
 
-    def _agent_line_sensors(self) -> tuple[float, float]:
-        """Read both QTR line sensors as floats (1.0 over white, 0.0 over black)."""
-        line_l = 1.0 if self._line_triggered_at(
-            self.robot_id, *AGENT_LINE_SENSORS[0],
-        ) else 0.0
-        line_r = 1.0 if self._line_triggered_at(
-            self.robot_id, *AGENT_LINE_SENSORS[1],
-        ) else 0.0
+    def _agent_line_sensors(self) -> tuple[float, ...]:
+        """Read every QTR line sensor as a float (1.0 over white, 0.0 over black).
+
+        E1b: one reading per ``spec.line_sensors`` entry, in spec order. The
+        default spec's two sensors (rear-left, rear-right) reproduce the
+        legacy ``AGENT_LINE_SENSORS`` pair byte-identically — same mount xy,
+        same per-step bit-flip DR draw order.
+        """
+        lines: list[float] = [
+            1.0 if self._line_triggered_at(self.robot_id, *ls.mount_xy) else 0.0
+            for ls in self.hw_spec.line_sensors
+        ]
         # alg/improvment: per-step line-sensor bit flip (hard sensor DR),
-        # modelling a dirty / edge-lit QTR. Zero-prob in eval.
+        # modelling a dirty / edge-lit QTR. Zero-prob in eval. One RNG draw
+        # per sensor, in order — matches the legacy two-draw sequence.
         if self._line_flip_prob > 0.0:
-            if self._np_random.random() < self._line_flip_prob:
-                line_l = 1.0 - line_l
-            if self._np_random.random() < self._line_flip_prob:
-                line_r = 1.0 - line_r
-        return line_l, line_r
+            for i in range(len(lines)):
+                if self._np_random.random() < self._line_flip_prob:
+                    lines[i] = 1.0 - lines[i]
+        return tuple(lines)
 
     def _build_obs(self, distances: list[Optional[float]]) -> np.ndarray:
-        front, left, right = distances
-        line_l, line_r = self._agent_line_sensors()
+        """Assemble the single-frame observation from the HardwareSpec.
+
+        E1b: the vector is ``[ d_0 ... d_{N-1} , <engineered in spec order> ]``
+        where ``N = spec.n_distance``. Each distance is normalised to [0, 1]
+        by ``ENEMY_FAR_DIST``; the engineered channels are looked up by name
+        from ``spec.engineered``. For the default spec (3 distances, 9
+        engineered) this is byte-identical to the legacy hand-written vector:
+            [front, left, right, last_seen_dir, line_l, line_r,
+             prev_left, prev_right, engagement, yaw_rate_proxy,
+             front_ir_delta, lateral_ir_delta]
+        """
+        # --- raw distance channels (normalised), spec order ---------------
+        norms = [self._norm(d) for d in distances]
+        # front = first sensor; lateral = the closest of the remaining
+        # (side) sensors. For the default these are the left/right pair, so
+        # `min_lateral` matches the legacy left/right minimum exactly.
+        front_norm = norms[0]
+        if len(norms) > 1:
+            min_lateral = min(norms[1:])
+        else:
+            min_lateral = front_norm
+
+        # --- line sensors -------------------------------------------------
+        lines = self._agent_line_sensors()
+
+        # --- prev action latch + engagement timer -------------------------
         prev_l, prev_r = self._prev_action
         engagement = min(1.0, self._engagement_timer / ENGAGEMENT_MAX_STEPS)
 
-        # Run 9: closing-rate features from previous-frame IR cache.
-        # Negative front_ir_delta = enemy approaching head-on; positive
-        # = enemy escaping. lateral_ir_delta uses the closer side IR so
-        # the policy sees Dodger-style pivot evasion regardless of which
-        # side the dodger spun away on. Clip + scale to [-1, +1].
-        front_norm = self._norm(front)
-        left_norm = self._norm(left)
-        right_norm = self._norm(right)
-        min_lateral = left_norm if left_norm < right_norm else right_norm
+        # --- Run 9 closing-rate (IR delta) features -----------------------
+        # Negative front_ir_delta = enemy approaching head-on; positive =
+        # escaping. lateral_ir_delta uses the closer side sensor so pivot
+        # evasion is visible regardless of which side it spun away on.
         raw_front_delta = front_norm - self._prev_front_norm
         raw_lateral_delta = min_lateral - self._prev_min_lateral
         front_ir_delta = max(-1.0, min(1.0, raw_front_delta * 2.0))
         lateral_ir_delta = max(-1.0, min(1.0, raw_lateral_delta * 2.0))
-        # Cache for next call AFTER computing the delta so this frame's
-        # delta is against the previous frame, not itself.
+        # Cache AFTER computing the delta (this frame vs the previous one).
         self._prev_front_norm = front_norm
         self._prev_min_lateral = min_lateral
 
-        return np.array(
-            [
-                front_norm,
-                left_norm,
-                right_norm,
-                self.last_seen_dir,
-                line_l,
-                line_r,
-                prev_l,
-                prev_r,
-                engagement,
-                self._yaw_rate_proxy,
-                front_ir_delta,
-                lateral_ir_delta,
-            ],
-            dtype=np.float32,
-        )
+        # --- name -> value table for the engineered channels --------------
+        feature_values: dict[str, float] = {
+            "last_seen_dir": float(self.last_seen_dir),
+            "prev_left": float(prev_l),
+            "prev_right": float(prev_r),
+            "engagement": float(engagement),
+            "yaw_rate_proxy": float(self._yaw_rate_proxy),
+            "front_ir_delta": float(front_ir_delta),
+            "lateral_ir_delta": float(lateral_ir_delta),
+        }
+        # Line-sensor channels: the conventional names (line_l, line_r) map
+        # positionally to the spec's line sensors; each sensor id is also
+        # registered so a non-default spec can name them by id.
+        for i, ls in enumerate(self.hw_spec.line_sensors):
+            feature_values[ls.id] = float(lines[i])
+        if len(lines) >= 1:
+            feature_values.setdefault("line_l", float(lines[0]))
+        if len(lines) >= 2:
+            feature_values.setdefault("line_r", float(lines[1]))
+
+        try:
+            engineered = [feature_values[name] for name in self.hw_spec.engineered]
+        except KeyError as exc:  # pragma: no cover - config error path
+            raise KeyError(
+                f"HardwareSpec.engineered names an unknown feature {exc.args[0]!r}; "
+                f"known: {sorted(feature_values)}"
+            ) from exc
+
+        return np.array(norms + engineered, dtype=np.float32)
 
     # ------------------------------------------------------------------
     # Action application
@@ -1430,17 +1469,18 @@ class MiniSumoEnv(gym.Env):
         self._tof_dropout_prob = DR_TOF_DROPOUT_PROB
 
         # alg/improvment: hard-sensor-DR per-episode draws (train only).
+        n_dist = self.hw_spec.n_distance
         if self.sensor_hard_dr:
             self._tof_calib_bias = self._np_random.normal(
-                0.0, DR_TOF_CALIB_BIAS_SIGMA, size=3,
+                0.0, DR_TOF_CALIB_BIAS_SIGMA, size=n_dist,
             )
             if self._np_random.random() < DR_TOF_STUCK_PROB:
-                self._tof_stuck_channel = int(self._np_random.integers(0, 3))
+                self._tof_stuck_channel = int(self._np_random.integers(0, n_dist))
             else:
                 self._tof_stuck_channel = None
             self._line_flip_prob = DR_LINE_FLIP_PROB
         else:
-            self._tof_calib_bias = np.zeros(3, dtype=np.float64)
+            self._tof_calib_bias = np.zeros(n_dist, dtype=np.float64)
             self._tof_stuck_channel = None
             self._line_flip_prob = 0.0
         self._tof_stuck_last = None
