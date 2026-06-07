@@ -220,13 +220,17 @@ _EVAL_N = 10
 _EVAL_SEED = 4242
 
 
-def evaluate_model(model_id: str) -> dict[str, Any] | None:
+def evaluate_model(model_id: str, mode: str = "quick") -> dict[str, Any] | None:
     """Run headless rollouts for ``model_id`` and cache the metrics.
 
-    Loads the checkpoint, infers its architecture, and runs
-    :func:`scripts.eval_best.run_eval` over a small opponent set at mult 3.0
-    (n=10 each). Writes the aggregated win-rate / self-out metrics into the
-    card and returns it. Returns ``None`` for an unknown id.
+    ``mode`` selects the opponent set:
+      * ``"quick"`` — a fast 3-opponent probe (dodger/spinner/rammer).
+      * ``"full"``  — the deployment-style gauntlet over the whole
+        trained-against zoo PLUS the held-out opponents (incl. novamax), so
+        the win-rate reflects real strength, not just easy evaders.
+    Both run at mult 3.0, n=10 each. Writes the aggregated win-rate +
+    self-out-rate + per-opponent metrics into the card. ``None`` for an
+    unknown id.
 
     Slow (real physics rollouts) — call on demand only.
     """
@@ -243,6 +247,12 @@ def evaluate_model(model_id: str) -> dict[str, Any] | None:
     from train_dqn_3d import DuelingQNet
     from scripts.eval_best import run_eval
 
+    if mode == "full":
+        from scripts.eval_best import SEEN_OPPONENTS, HELD_OUT
+        opponents = tuple(SEEN_OPPONENTS) + tuple(HELD_OUT)
+    else:
+        opponents = _EVAL_OPPONENTS
+
     state = torch.load(str(pt_path), map_location="cpu", weights_only=True)
     h1, obs_dim = state["trunk.0.weight"].shape
     h2 = state["trunk.2.weight"].shape[0]
@@ -256,7 +266,7 @@ def evaluate_model(model_id: str) -> dict[str, Any] | None:
     # PyBullet is single-client per process: serialize the rollouts so two
     # concurrent /evaluate calls queue instead of corrupting each other (500).
     with pybullet_lock:
-        for opp in _EVAL_OPPONENTS:
+        for opp in opponents:
             r = run_eval(model, opp, _EVAL_MULT, _EVAL_N, _EVAL_SEED)
             per_opp[opp] = {
                 "wr": r["wr"],
@@ -271,11 +281,13 @@ def evaluate_model(model_id: str) -> dict[str, Any] | None:
             total_self += r["self_out"]
 
     card["metrics"] = {
+        "mode": mode,
         "win_rate": total_wins / total_n if total_n else 0.0,
         "self_outs": total_self,
+        "self_out_rate": total_self / total_n if total_n else 0.0,
         "n_episodes": total_n,
         "mult": _EVAL_MULT,
-        "opponents": list(_EVAL_OPPONENTS),
+        "opponents": list(opponents),
         "per_opponent": per_opp,
         "evaluated_at": _iso(datetime.now(tz=timezone.utc).timestamp()),
     }

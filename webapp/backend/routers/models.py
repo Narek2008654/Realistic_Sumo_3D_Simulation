@@ -38,9 +38,16 @@ def finetune_candidates(model_id: str) -> list[dict[str, Any]]:
 
 
 @router.post("/{model_id}/evaluate")
-def evaluate(model_id: str) -> dict[str, Any]:
-    """Run headless rollouts and cache the metrics (slow; on demand only)."""
-    card = registry.evaluate_model(model_id)
+def evaluate(model_id: str, mode: str = "quick") -> dict[str, Any]:
+    """Run headless rollouts and cache the metrics (slow; on demand only).
+
+    ``mode`` = ``quick`` (3-opponent probe) or ``full`` (whole zoo + held-out).
+    """
+    if mode not in ("quick", "full"):
+        raise HTTPException(
+            status_code=422, detail="mode must be 'quick' or 'full'"
+        )
+    card = registry.evaluate_model(model_id, mode=mode)
     if card is None:
         raise HTTPException(status_code=404, detail=f"unknown model: {model_id}")
     return card
