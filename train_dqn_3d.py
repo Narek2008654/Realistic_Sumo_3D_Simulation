@@ -1316,17 +1316,27 @@ inline uint8_t verify_self_test() {{
 def emit_firmware_headers(qnet: DuelingQNet) -> None:
     """Write the C++ header to BOTH the canonical firmware/ copy and the
     firmware/v3_deploy/ copy the deployed sketch #includes. They were
-    previously hand-synced; emitting both keeps them byte-identical."""
-    targets = [
-        FIRMWARE / "neural_net_v6_3d.h",
-        FIRMWARE / "v3_deploy" / "neural_net_v6_3d.h",
-    ]
+    previously hand-synced; emitting both keeps them byte-identical.
+
+    When running as a webapp job (SUMO_RUN_CONFIG set), write into that job's
+    own dir instead, so a UI-driven training run never clobbers the committed
+    deploy headers."""
+    run_cfg = os.environ.get("SUMO_RUN_CONFIG")
+    if run_cfg:
+        job_fw = Path(run_cfg).resolve().parent / "firmware"
+        job_fw.mkdir(parents=True, exist_ok=True)
+        targets = [job_fw / "neural_net_v6_3d.h"]
+    else:
+        targets = [
+            FIRMWARE / "neural_net_v6_3d.h",
+            FIRMWARE / "v3_deploy" / "neural_net_v6_3d.h",
+        ]
     for t in targets:
         if not t.parent.exists():
             print(f"  skip {t} (dir missing)", flush=True)
             continue
         _emit_dqn_header(qnet, t)
-        print(f"Wrote {t.relative_to(HERE_TOP)}", flush=True)
+        print(f"Wrote {t}", flush=True)
 
 
 if __name__ == "__main__":
