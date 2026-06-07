@@ -5,6 +5,8 @@ import type {
   Geometry,
   HardwareSpec,
   ModelCard,
+  RobotRecord,
+  RobotSummary,
   ValidateResult,
 } from './types';
 
@@ -70,4 +72,34 @@ export const api = {
   // metrics populated. Triggered explicitly from the UI, never on list load.
   evaluate: (id: string) =>
     request<ModelCard>(`/api/models/${id}/evaluate`, { method: 'POST' }),
+
+  // ---- Saved robots --------------------------------------------------------
+  saveRobot: (name: string, spec: HardwareSpec) =>
+    request<RobotRecord>('/api/robots', {
+      method: 'POST',
+      body: JSON.stringify({ name, hardware_spec: spec }),
+    }),
+
+  listRobots: () => request<RobotSummary[]>('/api/robots'),
+
+  getRobot: (id: string) => request<RobotRecord>(`/api/robots/${id}`),
+
+  // URDF endpoint returns text/plain, so bypass the JSON request helper.
+  getRobotUrdf: async (id: string): Promise<string> => {
+    const res = await fetch(`/api/robots/${id}/urdf`);
+    if (!res.ok) {
+      let message = `${res.status} ${res.statusText}`;
+      try {
+        const body = await res.json();
+        if (typeof body?.detail === 'string') message = body.detail;
+      } catch {
+        // non-JSON error body — keep the status text
+      }
+      throw new ApiError(res.status, message, message);
+    }
+    return res.text();
+  },
+
+  deleteRobot: (id: string) =>
+    request<{ deleted: boolean }>(`/api/robots/${id}`, { method: 'DELETE' }),
 };

@@ -3,6 +3,7 @@ import { AppShell } from './components/AppShell';
 import ComingSoon from './pages/ComingSoon';
 import Hardware from './pages/Hardware';
 import Models from './pages/Models';
+import Robots from './pages/Robots';
 
 export default function App() {
   return (
@@ -10,6 +11,7 @@ export default function App() {
       <Routes>
         <Route path="/" element={<Navigate to="/hardware" replace />} />
         <Route path="/hardware" element={<Hardware />} />
+        <Route path="/robots" element={<Robots />} />
         <Route path="/models" element={<Models />} />
         <Route
           path="/train"

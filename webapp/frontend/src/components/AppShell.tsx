@@ -33,6 +33,16 @@ const NAV: NavItem[] = [
     ),
   },
   {
+    to: '/robots',
+    label: 'Robots',
+    icon: (
+      <svg viewBox="0 0 24 24" className="h-4 w-4" {...stroke}>
+        <rect x="5" y="8" width="14" height="10" rx="2" />
+        <path d="M9 8V5h6v3M9 13h.01M15 13h.01M3 12h2M19 12h2" />
+      </svg>
+    ),
+  },
+  {
     to: '/train',
     label: 'Train',
     icon: (
@@ -131,6 +141,7 @@ function BackendChip() {
 
 const TITLES: Record<string, string> = {
   '/hardware': 'Hardware Builder',
+  '/robots': 'Saved Robots',
   '/train': 'Training',
   '/arena': 'Arena',
   '/opponents': 'Opponents',

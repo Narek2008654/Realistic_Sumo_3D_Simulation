@@ -26,7 +26,7 @@ export interface Drivetrain {
 }
 
 export interface Chassis {
-  length_m: number;
+  length_m: number; // body length (chassis box X extent, no wedge)
   width_m: number;
   height_m: number;
   mass_kg: number;
@@ -35,7 +35,15 @@ export interface Chassis {
   wheel_friction: number;
   wedge_present: boolean;
   wedge_length_m: number;
-  wedge_pitch_rad: number;
+  wedge_low_height_m: number;
+  wedge_high_height_m: number;
+  // Optional explicit pitch override (radians); null -> derived from edges.
+  wedge_pitch_override_rad: number | null;
+}
+
+export interface Dohyo {
+  radius_m: number;
+  border_width_m: number;
 }
 
 export interface ActionSpace {
@@ -58,6 +66,22 @@ export interface HardwareSpec {
   action_space: ActionSpace;
   reward: RewardSpec;
   engineered: string[];
+  dohyo: Dohyo;
+}
+
+// ---- Saved robots ----------------------------------------------------------
+
+export interface RobotSummary {
+  id: string;
+  name: string;
+  created_at: string;
+  obs_dim: number;
+  action_dim: number;
+  obs_signature_hash: string | null;
+}
+
+export interface RobotRecord extends RobotSummary {
+  hardware_spec: HardwareSpec;
 }
 
 // ---- API response shapes ---------------------------------------------------
