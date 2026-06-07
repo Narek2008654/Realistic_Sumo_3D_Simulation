@@ -205,9 +205,12 @@ def generate_urdf(spec: HardwareSpec) -> str:
     # ---- nose_wedge (optional) -----------------------------------------
     if ch.wedge_present:
         # Slab geometry mirrors the reference: a thin box whose long axis is
-        # the slope length, pitched about +Y by wedge_pitch_rad, mounted at
-        # the chassis front face. Slope length = wedge_length / cos(pitch)
-        # (the 28.82 mm horizontal run becomes the 33.13 mm slope at 0.5113).
+        # the slope length, pitched about +Y, mounted at the chassis front
+        # face. The wedge is described by its horizontal run (wedge_length_m)
+        # and its two edge heights (wedge_low_height_m / wedge_high_height_m);
+        # the pitch is the derived ``wedge_pitch_rad`` property
+        # (atan2(high - low, run)). Slope length = run / cos(pitch) (the
+        # 28.82 mm run becomes the 33.13 mm slope at 0.5113).
         pitch = ch.wedge_pitch_rad
         cos_p = math.cos(pitch)
         slope_len = ch.wedge_length_m / cos_p if abs(cos_p) > 1e-6 \

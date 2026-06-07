@@ -22,8 +22,71 @@ if _REPO_ROOT not in sys.path:
 from webapp.shared.hardware_spec import HardwareSpec  # noqa: E402
 
 
+# The default obs/action contract hash is FROZEN: every committed 21/9
+# checkpoint is finetune-compatible only against this exact signature. Adding
+# world geometry (dohyo size) or restructuring the wedge MUST NOT change it.
+DEFAULT_OBS_SIGNATURE = "1878ebc3a009"
+
+
 def test_obs_dim_is_21():
     assert HardwareSpec.default().obs_dim == 21
+
+
+def test_default_obs_signature_unchanged():
+    """The default signature is pinned (dohyo + wedge changes excluded)."""
+    assert HardwareSpec.default().obs_signature_hash == DEFAULT_OBS_SIGNATURE
+
+
+def test_dohyo_defaults_present():
+    """Default ring radius/border match sumo_env DOHYO_RADIUS / BORDER_WIDTH."""
+    dohyo = HardwareSpec.default().dohyo
+    assert math.isclose(dohyo.radius_m, 0.35)        # DOHYO_RADIUS = 0.70/2
+    assert math.isclose(dohyo.border_width_m, 0.025)  # BORDER_WIDTH
+    # Inner (black-disc) radius is radius - border = 0.325 (INNER_RADIUS).
+    assert math.isclose(dohyo.radius_m - dohyo.border_width_m, 0.325)
+
+
+def test_dohyo_excluded_from_signature():
+    """Changing the dohyo radius must NOT change the obs signature."""
+    import dataclasses
+
+    base = HardwareSpec.default()
+    big_ring = dataclasses.replace(base, dohyo=dataclasses.replace(
+        base.dohyo, radius_m=0.50))
+    assert big_ring.obs_signature_hash == base.obs_signature_hash
+    assert big_ring.obs_signature_hash == DEFAULT_OBS_SIGNATURE
+
+
+def test_wedge_pitch_derived_matches_today():
+    """Derived pitch reproduces the historical 0.5113 rad wedge."""
+    ch = HardwareSpec.default().chassis
+    assert ch.wedge_low_height_m == 0.0
+    # high = run * tan(0.5113) so the derived pitch is exactly 0.5113.
+    assert math.isclose(ch.wedge_pitch_rad, 0.5113, abs_tol=1e-12)
+    # body_length_m is an alias of length_m.
+    assert ch.body_length_m == ch.length_m
+
+
+def test_wedge_low_high_round_trip():
+    """Low/high edge heights survive dict + JSON round-trips."""
+    spec = HardwareSpec.default()
+    for rebuilt in (HardwareSpec.from_dict(spec.to_dict()),
+                    HardwareSpec.from_json(spec.to_json())):
+        assert rebuilt.chassis.wedge_low_height_m == spec.chassis.wedge_low_height_m
+        assert rebuilt.chassis.wedge_high_height_m == spec.chassis.wedge_high_height_m
+        assert math.isclose(rebuilt.chassis.wedge_pitch_rad,
+                            spec.chassis.wedge_pitch_rad)
+        assert rebuilt.dohyo == spec.dohyo
+
+
+def test_wedge_pitch_override():
+    """An explicit override wins over the derived pitch."""
+    import dataclasses
+
+    base = HardwareSpec.default()
+    forced = dataclasses.replace(
+        base.chassis, wedge_pitch_override_rad=1.0)
+    assert forced.wedge_pitch_rad == 1.0
 
 
 def test_action_dim_is_9():

@@ -604,6 +604,18 @@ class MiniSumoEnv(gym.Env):
         # Gymnasium's reserved EnvSpec slot — shadowing it breaks str(env),
         # gym.make registration, and Wrapper.spec).
         self.hw_spec = hardware_spec if hardware_spec is not None else HardwareSpec.default()
+        # add/ui-local: the dohyo (ring) geometry is now spec-driven. The
+        # instance attrs default to the module constants when the spec carries
+        # the default radius/border (DOHYO_RADIUS / BORDER_WIDTH), so the
+        # default spec is byte-identical to today. A non-default radius scales
+        # the platform, its border ring, the line-trigger annulus, AND the
+        # spawn radius (so the bots stay proportionally placed inside the ring).
+        self._dohyo_radius = float(self.hw_spec.dohyo.radius_m)
+        self._border_width = float(self.hw_spec.dohyo.border_width_m)
+        self._inner_radius = self._dohyo_radius - self._border_width
+        # Spawn radius keeps its default 0.25 m for the default ring and scales
+        # with the ring otherwise (SPAWN_RADIUS / DOHYO_RADIUS is the fraction).
+        self._spawn_radius = SPAWN_RADIUS * (self._dohyo_radius / DOHYO_RADIUS)
         # E1c: the AGENT's wheel motor caps come from the spec's drivetrain.
         # Defaults equal the module constants AGENT_MAX_FORCE/AGENT_MAX_RAD
         # (== WHEEL_MAX_TORQUE/WHEEL_OMEGA_FWD), so behaviour is unchanged.
@@ -773,11 +785,12 @@ class MiniSumoEnv(gym.Env):
 
     def _build_dohyo(self, surface_friction: float) -> None:
         white_visual = p.createVisualShape(
-            shapeType=p.GEOM_CYLINDER, radius=DOHYO_RADIUS,
+            shapeType=p.GEOM_CYLINDER, radius=self._dohyo_radius,
             length=DOHYO_THICKNESS, rgbaColor=(1.0, 1.0, 1.0, 1.0),
         )
         white_collision = p.createCollisionShape(
-            shapeType=p.GEOM_CYLINDER, radius=DOHYO_RADIUS, height=DOHYO_THICKNESS,
+            shapeType=p.GEOM_CYLINDER, radius=self._dohyo_radius,
+            height=DOHYO_THICKNESS,
         )
         white_id = p.createMultiBody(
             baseMass=0.0, baseCollisionShapeIndex=white_collision,
@@ -787,11 +800,11 @@ class MiniSumoEnv(gym.Env):
         p.changeDynamics(white_id, -1, lateralFriction=surface_friction)
 
         black_visual = p.createVisualShape(
-            shapeType=p.GEOM_CYLINDER, radius=INNER_RADIUS,
+            shapeType=p.GEOM_CYLINDER, radius=self._inner_radius,
             length=BLACK_TOP_THICKNESS, rgbaColor=(0.05, 0.05, 0.05, 1.0),
         )
         black_collision = p.createCollisionShape(
-            shapeType=p.GEOM_CYLINDER, radius=INNER_RADIUS,
+            shapeType=p.GEOM_CYLINDER, radius=self._inner_radius,
             height=BLACK_TOP_THICKNESS,
         )
         black_id = p.createMultiBody(
@@ -959,7 +972,7 @@ class MiniSumoEnv(gym.Env):
         cy, sy = math.cos(yaw), math.sin(yaw)
         wx = pos[0] + cy * body_x - sy * body_y
         wy = pos[1] + sy * body_x + cy * body_y
-        return math.hypot(wx, wy) > INNER_RADIUS
+        return math.hypot(wx, wy) > self._inner_radius
 
     def _novamax_line_triggered(self, body_x: float, body_y: float) -> bool:
         """Backwards-compat wrapper for the enemy's line sensors."""
@@ -1512,8 +1525,8 @@ class MiniSumoEnv(gym.Env):
                                                       math.radians(10)))
         yaw_jitter_e = float(self._np_random.uniform(-math.radians(10),
                                                       math.radians(10)))
-        radius_a = SPAWN_RADIUS + float(self._np_random.uniform(-0.05, 0.05))
-        radius_e = SPAWN_RADIUS + float(self._np_random.uniform(-0.05, 0.05))
+        radius_a = self._spawn_radius + float(self._np_random.uniform(-0.05, 0.05))
+        radius_e = self._spawn_radius + float(self._np_random.uniform(-0.05, 0.05))
 
         agent_pos = (
             radius_a * math.cos(angle),

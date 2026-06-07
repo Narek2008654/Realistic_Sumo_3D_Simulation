@@ -109,8 +109,42 @@ class Drivetrain:
 
 
 @dataclass(frozen=True)
+class Dohyo:
+    """The competition ring (dohyo) geometry.
+
+    ``radius_m`` is the outer radius of the white playing surface (metres);
+    a robot whose body centre is carried beyond this falls off the edge.
+    ``border_width_m`` is the width of the white border ring at the rim;
+    the black inner disc therefore has radius ``radius_m - border_width_m``,
+    and a downward line sensor over that annulus reads "border".
+
+    NOTE: the dohyo size is a WORLD parameter, not part of the robot's
+    observation/action contract, so it is deliberately EXCLUDED from
+    ``HardwareSpec.obs_signature_hash`` — changing the ring does not change
+    obs/action byte-compatibility.
+    """
+
+    radius_m: float
+    border_width_m: float
+
+
+@dataclass(frozen=True)
 class Chassis:
-    """Rigid-body and contact parameters of the robot body + wedge."""
+    """Rigid-body and contact parameters of the robot body + wedge.
+
+    The chassis box is described by ``length_m`` / ``width_m`` / ``height_m``,
+    where ``length_m`` is the box X extent WITHOUT the wedge (the wedge is a
+    separate slab mounted at the front face). ``body_length_m`` is a read-only
+    alias of ``length_m`` for callers that want the explicit "body, no wedge"
+    name.
+
+    The wedge is described by its horizontal run (``wedge_length_m``) plus the
+    heights of its two edges above the floor: ``wedge_low_height_m`` is the
+    front lip / sharp tip (thin edge), ``wedge_high_height_m`` is the tall
+    rear edge where it joins the chassis. The slope angle is derived from
+    these as the ``wedge_pitch_rad`` property; pass ``wedge_pitch_override_rad``
+    only to force a specific pitch (rare).
+    """
 
     length_m: float
     width_m: float
@@ -121,7 +155,31 @@ class Chassis:
     wheel_friction: float
     wedge_present: bool
     wedge_length_m: float
-    wedge_pitch_rad: float
+    wedge_low_height_m: float
+    wedge_high_height_m: float
+    # Optional explicit pitch override (radians). When None, the pitch is
+    # derived from the low/high edge heights and the wedge length.
+    wedge_pitch_override_rad: float | None = None
+
+    @property
+    def body_length_m(self) -> float:
+        """Chassis box X extent WITHOUT the wedge (alias of ``length_m``)."""
+        return self.length_m
+
+    @property
+    def wedge_pitch_rad(self) -> float:
+        """Slope angle of the wedge about +Y (radians).
+
+        Derived from the edge heights and the horizontal run as
+        ``atan2(high - low, wedge_length_m)`` unless an explicit
+        ``wedge_pitch_override_rad`` is supplied.
+        """
+        if self.wedge_pitch_override_rad is not None:
+            return self.wedge_pitch_override_rad
+        return math.atan2(
+            self.wedge_high_height_m - self.wedge_low_height_m,
+            self.wedge_length_m,
+        )
 
 
 @dataclass(frozen=True)
@@ -184,6 +242,7 @@ class HardwareSpec:
     action_space: ActionSpace
     reward: RewardSpec
     engineered: tuple[str, ...]
+    dohyo: Dohyo
 
     # -- derived sizes -----------------------------------------------------
     @property
@@ -259,9 +318,20 @@ class HardwareSpec:
         """Rebuild a spec from ``to_dict`` output (tuples restored)."""
         chassis_d = dict(data["chassis"])
         chassis_d["com_xyz"] = tuple(chassis_d["com_xyz"])
+        # ``wedge_pitch_rad`` is a derived PROPERTY (not a field) -> drop it if a
+        # legacy/serialised dict carries it. ``body_length_m`` is likewise an
+        # alias property; drop any stray copy too.
+        chassis_d.pop("wedge_pitch_rad", None)
+        chassis_d.pop("body_length_m", None)
         chassis = Chassis(**chassis_d)
 
         drivetrain = Drivetrain(**data["drivetrain"])
+
+        dohyo_d = dict(data["dohyo"])
+        dohyo = Dohyo(
+            radius_m=float(dohyo_d["radius_m"]),
+            border_width_m=float(dohyo_d["border_width_m"]),
+        )
 
         distance_sensors = tuple(
             DistanceSensor(
@@ -302,6 +372,7 @@ class HardwareSpec:
             action_space=action_space,
             reward=reward,
             engineered=tuple(data["engineered"]),
+            dohyo=dohyo,
         )
 
     def to_json(self, *, indent: int | None = 2) -> str:
@@ -348,8 +419,15 @@ class HardwareSpec:
             max_omega_rad_s=41.88,   # sumo_env.py:147 AGENT_MAX_RAD
         )
 
+        # Wedge edge heights: keep the front lip on the floor (low = 0) and
+        # set the back edge so the DERIVED pitch reproduces today's 0.5113 rad
+        # (robot.urdf:162) for the 28.82 mm run, i.e. high = run * tan(0.5113).
+        # This makes generate_urdf(default) byte-identical to the prior wedge.
+        wedge_run = 0.02882          # robot.urdf:19 wedge 28.82 mm long
+        wedge_low = 0.0              # front lip skims the floor
+        wedge_high = wedge_run * math.tan(0.5113)  # back edge -> pitch 0.5113
         chassis = Chassis(
-            length_m=0.0669,         # robot.urdf:13/63 chassis box X
+            length_m=0.0669,         # robot.urdf:13/63 chassis box X (body, no wedge)
             width_m=0.098,           # robot.urdf:13/63 chassis box Y
             height_m=0.050,          # robot.urdf:13/63 chassis box Z
             mass_kg=0.45,            # robot.urdf:46 mass value
@@ -357,8 +435,10 @@ class HardwareSpec:
             chassis_friction=0.05,   # sumo_env.py:182 CHASSIS_FRICTION
             wheel_friction=2.0,      # sumo_env.py:176 WHEEL_FRICTION
             wedge_present=True,       # robot.urdf:108-163 nose_wedge link
-            wedge_length_m=0.02882,  # robot.urdf:19 wedge 28.82 mm long
-            wedge_pitch_rad=0.5113,  # robot.urdf:162 wedge joint pitch
+            wedge_length_m=wedge_run,
+            wedge_low_height_m=wedge_low,
+            wedge_high_height_m=wedge_high,
+            # No override: wedge_pitch_rad property derives 0.5113 from the above.
         )
 
         # sumo_env.py:423-427 DISCRETE_ACTION_MAP (9 entries).
@@ -405,6 +485,10 @@ class HardwareSpec:
             "lateral_ir_delta",
         )
 
+        # sumo_env.py:43-46 DOHYO_RADIUS = 0.70/2 = 0.35, BORDER_WIDTH = 0.025
+        # (INNER_RADIUS = 0.325 is derived as radius_m - border_width_m).
+        dohyo = Dohyo(radius_m=0.35, border_width_m=0.025)
+
         return cls(
             name="default_v3",
             chassis=chassis,
@@ -415,4 +499,5 @@ class HardwareSpec:
             action_space=action_space,
             reward=reward,
             engineered=engineered,
+            dohyo=dohyo,
         )
