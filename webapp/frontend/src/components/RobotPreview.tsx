@@ -27,12 +27,17 @@ import type {
   GeomLink,
   HardwareSpec,
   LineSensor,
+  PreviewView,
   Vec3,
 } from '../types';
 import { CornerTicks } from './ui';
+import { Info } from './Info';
 
 const ACCENT = '#ff7a18';
 const CYAN = '#2ad4ff';
+// Center-of-mass marker colour — deliberately distinct from ToF orange and
+// line cyan. A bright magenta reads clearly against the dark stage + orange rig.
+const COM = '#ff3df0';
 
 // URDF/PyBullet are Z-up; three.js is Y-up. We rotate the whole rig -90deg
 // about X so the robot stands on the floor and reads naturally. Sensor overlays
@@ -237,6 +242,44 @@ function LineFootprint({ sensor }: { sensor: LineSensor }) {
   );
 }
 
+/** Center-of-mass marker at chassis.com_xyz: a magenta sphere wrapped in a
+ * 3-axis crosshair. Drawn with depthTest off + a high renderOrder so it stays
+ * visible through the chassis in both the top and underside views. Lives inside
+ * the Z-up group, so com_xyz (body frame, x fwd / y left / z up) maps directly. */
+function ComMarker({ com }: { com: Vec3 }) {
+  const [x, y, z] = com;
+  const armLen = 0.018; // half-length of each crosshair arm
+  const armR = 0.0006;
+  // The three crosshair arms: along body X, Y, Z. Cylinder default axis is +Y,
+  // so rotate for the X and Z arms.
+  const arms: { rot: [number, number, number] }[] = [
+    { rot: [0, 0, Math.PI / 2] }, // X arm
+    { rot: [0, 0, 0] }, // Y arm
+    { rot: [Math.PI / 2, 0, 0] }, // Z arm
+  ];
+  return (
+    <group position={[x, y, z]} renderOrder={999}>
+      {/* core sphere */}
+      <mesh renderOrder={999}>
+        <sphereGeometry args={[0.0055, 18, 14]} />
+        <meshBasicMaterial color={COM} depthTest={false} transparent opacity={0.95} />
+      </mesh>
+      {/* faint halo so it reads on bright orange */}
+      <mesh renderOrder={998}>
+        <sphereGeometry args={[0.009, 18, 14]} />
+        <meshBasicMaterial color={COM} depthTest={false} transparent opacity={0.18} />
+      </mesh>
+      {/* 3-axis crosshair */}
+      {arms.map((a, i) => (
+        <mesh key={i} rotation={a.rot} renderOrder={999}>
+          <cylinderGeometry args={[armR, armR, armLen * 2, 6]} />
+          <meshBasicMaterial color={COM} depthTest={false} transparent opacity={0.9} />
+        </mesh>
+      ))}
+    </group>
+  );
+}
+
 function Dohyo({ radius, border }: { radius: number; border: number }) {
   const inner = Math.max(0.001, radius - border);
   return (
@@ -331,6 +374,8 @@ function Scene({
             />
           ),
         )}
+
+        {spec && <ComMarker com={spec.chassis.com_xyz} />}
       </group>
 
       <ContactShadows
@@ -359,13 +404,24 @@ export function RobotPreview({
   spec,
   loading,
   error,
+  view,
+  onViewChange,
 }: {
   geom: Geometry | null;
   spec?: HardwareSpec | null;
   loading?: boolean;
   error?: string | null;
+  // Optional controlled TOP/UNDERSIDE view (interview drives this so the
+  // line-sensor step auto-flips underneath). Uncontrolled if omitted.
+  view?: PreviewView;
+  onViewChange?: (v: PreviewView) => void;
 }) {
-  const [underside, setUnderside] = useState(false);
+  const [internalUnderside, setInternalUnderside] = useState(false);
+  const underside = view != null ? view === 'UNDERSIDE' : internalUnderside;
+  const setUnderside = (u: boolean) => {
+    if (onViewChange) onViewChange(u ? 'UNDERSIDE' : 'TOP');
+    else setInternalUnderside(u);
+  };
 
   // Camera differs per view: top-down-ish orbit vs. low-angle from beneath.
   const camera = underside
@@ -413,13 +469,36 @@ export function RobotPreview({
         })}
       </div>
 
-      {/* sensor legend (underside emphasises line footprints) */}
-      <div className="pointer-events-none absolute bottom-2.5 left-4 z-10 flex gap-3">
-        <span className="micro num" style={{ fontSize: 9, color: 'var(--accent)' }}>
+      {/* sensor legend (underside emphasises line footprints). The labels are
+          non-interactive, but each carries a pointer-events-auto ⓘ that explains
+          the overlay in plain words. */}
+      <div className="pointer-events-none absolute bottom-2.5 left-4 z-30 flex gap-3">
+        <span
+          className="micro num inline-flex items-center gap-1"
+          style={{ fontSize: 9, color: 'var(--accent)' }}
+        >
           ◆ ToF · ray = range
+          <span className="pointer-events-auto">
+            <Info topic="tof_sensor" color="var(--accent)" placement="top" />
+          </span>
         </span>
-        <span className="micro num" style={{ fontSize: 9, color: 'var(--cyan)' }}>
+        <span
+          className="micro num inline-flex items-center gap-1"
+          style={{ fontSize: 9, color: 'var(--cyan)' }}
+        >
           ● LINE {underside ? 'footprint' : 'sensor'}
+          <span className="pointer-events-auto">
+            <Info topic="line_sensor" color="var(--cyan)" placement="top" />
+          </span>
+        </span>
+        <span
+          className="micro num inline-flex items-center gap-1"
+          style={{ fontSize: 9, color: COM }}
+        >
+          ⊕ CoM
+          <span className="pointer-events-auto">
+            <Info topic="com" color={COM} placement="top" />
+          </span>
         </span>
       </div>
 

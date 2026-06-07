@@ -1,5 +1,6 @@
 // Compact labelled form controls with mono numeric readouts.
 import { useEffect, useState } from 'react';
+import { Info } from './Info';
 
 export function NumberField({
   label,
@@ -149,6 +150,7 @@ export function SliderField({
   step = 0.001,
   unit,
   format = (v) => v.toFixed(3),
+  info,
 }: {
   label: string;
   value: number;
@@ -158,6 +160,9 @@ export function SliderField({
   step?: number;
   unit?: string;
   format?: (v: number) => string;
+  // Optional glossary topic key — adds a subtle ⓘ next to the label that
+  // explains this control in plain words (see help.ts / Info.tsx).
+  info?: string;
 }) {
   // The slider is clamped to [min,max]; the number box accepts any value the
   // user types (clamping only the slider thumb position, not the stored value).
@@ -165,14 +170,14 @@ export function SliderField({
   return (
     <label className="flex flex-col gap-1">
       <div className="flex items-center justify-between">
-        <span className="micro text-fg-2" style={{ fontSize: 10 }}>
+        <span className="micro inline-flex items-center gap-1.5 text-fg-2" style={{ fontSize: 10 }}>
           {label}
           {unit && (
             <span className="text-fg-2" style={{ fontSize: 9 }}>
-              {' '}
               · {unit}
             </span>
           )}
+          {info && <Info topic={info} />}
         </span>
         <ValueBox value={value} onChange={onChange} min={min} max={max} />
       </div>
@@ -202,10 +207,12 @@ export function Readout({
   label,
   value,
   tone = 'fg',
+  info,
 }: {
   label: string;
   value: string;
   tone?: 'fg' | 'cyan' | 'accent' | 'win' | 'loss';
+  info?: string;
 }) {
   const color =
     tone === 'cyan'
@@ -222,8 +229,9 @@ export function Readout({
       className="flex flex-col gap-1 rounded border px-3 py-2"
       style={{ borderColor: 'var(--line)', background: 'var(--bg-2)' }}
     >
-      <span className="micro text-fg-2" style={{ fontSize: 9 }}>
+      <span className="micro inline-flex items-center gap-1.5 text-fg-2" style={{ fontSize: 9 }}>
         {label}
+        {info && <Info topic={info} />}
       </span>
       <span className="num" style={{ fontSize: 16, color }}>
         {value}

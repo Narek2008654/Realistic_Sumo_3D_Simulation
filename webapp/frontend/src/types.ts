@@ -4,6 +4,9 @@
 
 export type Vec3 = [number, number, number];
 
+// 3D preview camera mode (frontend-only UI state).
+export type PreviewView = 'TOP' | 'UNDERSIDE';
+
 export interface DistanceSensor {
   id: string;
   mount_xyz: Vec3;

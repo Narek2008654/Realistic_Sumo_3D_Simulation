@@ -1,18 +1,23 @@
 // Hardware Builder: seed a HardwareSpec (from the backend default, or a spec
-// handed off by the Robots page), edit chassis / wedge / drivetrain / dohyo /
-// distance + line sensors, live 3D preview with sensor overlays + underside
-// view, debounced validate, and Save-to-robots.
+// handed off by the Robots page) then either run the guided INTERVIEW (wizard
+// that auto-builds the robot from plain-language answers) or jump to CALIBRATE
+// (the full detailed form). A persistent right-pane 3D preview — with sensor
+// overlays, an underside view, and a center-of-mass marker — is shown in both
+// modes. Debounced validate + Save-to-robots happen in Calibrate.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api, ApiError } from '../api';
 import { Readout, SliderField } from '../components/fields';
+import { Interview, type SpecUpdaters } from '../components/Interview';
 import { RobotPreview } from '../components/RobotPreview';
+import { Info } from '../components/Info';
 import { Panel, Reveal, StatusDot } from '../components/ui';
 import { useBuilderStore } from '../store/builder';
 import type {
   DistanceSensor,
   Geometry,
   HardwareSpec,
+  PreviewView,
   ValidateResult,
 } from '../types';
 
@@ -22,10 +27,19 @@ function deg(rad: number): string {
   return `${((rad * 180) / Math.PI).toFixed(0)}°`;
 }
 
+type Mode = 'interview' | 'calibrate';
+
 export default function Hardware() {
   const [spec, setSpec] = useState<HardwareSpec | null>(null);
   const [seedError, setSeedError] = useState<string | null>(null);
   const [seedName, setSeedName] = useState<string | null>(null);
+
+  // Mode: the interview wizard (default for a fresh build) or the detailed
+  // calibrate form. Loading a robot from /robots jumps straight to calibrate.
+  const [mode, setMode] = useState<Mode>('interview');
+  // Controlled preview camera so the interview can flip to the underside for
+  // the line-sensor step; calibrate leaves the preview's own toggle in charge.
+  const [previewView, setPreviewView] = useState<PreviewView>('TOP');
 
   const [geom, setGeom] = useState<Geometry | null>(null);
   const [geomError, setGeomError] = useState<string | null>(null);
@@ -46,8 +60,10 @@ export default function Hardware() {
     seededRef.current = true;
     const handoff = consume();
     if (handoff) {
+      // A robot loaded from /robots is already built — go straight to calibrate.
       setSpec(handoff.spec);
       setSeedName(handoff.name);
+      setMode('calibrate');
       return;
     }
     api
@@ -123,6 +139,11 @@ export default function Hardware() {
       d.chassis.wedge_present = !d.chassis.wedge_present;
       return d;
     });
+  const setWedgePresent = (present: boolean) =>
+    patch((d) => {
+      d.chassis.wedge_present = present;
+      return d;
+    });
 
   function setSensor(i: number, mut: (s: DistanceSensor) => void) {
     patch((d) => {
@@ -169,6 +190,56 @@ export default function Hardware() {
       return d;
     });
   }
+
+  // Set the sensor counts directly (interview CountPicker). Grows by appending
+  // sensible defaults, shrinks by trimming from the end — preserving existing
+  // sensor configs the user already tuned.
+  function setSensorCount(n: number) {
+    patch((d) => {
+      const cur = d.distance_sensors.length;
+      if (n > cur) {
+        for (let k = cur; k < n; k++) {
+          d.distance_sensors.push({
+            id: `tof_${k}`,
+            mount_xyz: [0.045, 0.0, 0.007],
+            angle_rad: 0,
+            range_m: 0.8,
+            noise_sigma: 0.016,
+          });
+        }
+      } else if (n < cur) {
+        d.distance_sensors.length = Math.max(0, n);
+      }
+      return d;
+    });
+  }
+  function setLineCount(n: number) {
+    patch((d) => {
+      const cur = d.line_sensors.length;
+      if (n > cur) {
+        for (let k = cur; k < n; k++) {
+          d.line_sensors.push({ id: `line_${k}`, mount_xy: [-0.024, 0.04] });
+        }
+      } else if (n < cur) {
+        d.line_sensors.length = Math.max(0, n);
+      }
+      return d;
+    });
+  }
+
+  // One bundle of updaters shared by the interview wizard. The calibrate form
+  // uses the same primitives directly.
+  const updaters: SpecUpdaters = {
+    setChassis,
+    setCom,
+    setDrive,
+    setDohyo,
+    setWedgePresent,
+    setSensor,
+    setSensorCount,
+    setLine,
+    setLineCount,
+  };
 
   // Save flow ----------------------------------------------------------------
   const [saving, setSaving] = useState(false);
@@ -229,6 +300,34 @@ export default function Hardware() {
   const c = spec.chassis;
   const dt = spec.drivetrain;
 
+  // INTERVIEW MODE — guided wizard on the left, persistent preview on the right.
+  if (mode === 'interview') {
+    return (
+      <div className="grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(0,1.05fr)]">
+        <Reveal index={0}>
+          <Interview
+            spec={spec}
+            updaters={updaters}
+            onViewRequest={setPreviewView}
+            onFinish={() => setMode('calibrate')}
+            onSkip={() => setMode('calibrate')}
+          />
+        </Reveal>
+        <Reveal index={1} className="xl:sticky xl:top-5 xl:self-start">
+          <RobotPreview
+            geom={geom}
+            spec={spec}
+            loading={geomLoading}
+            error={geomError}
+            view={previewView}
+            onViewChange={setPreviewView}
+          />
+        </Reveal>
+      </div>
+    );
+  }
+
+  // CALIBRATE MODE — full detailed form + validation + save bar.
   return (
     <div className="flex flex-col gap-5">
       {/* Save bar */}
@@ -314,6 +413,16 @@ export default function Hardware() {
                 </button>
               )}
               <button
+                className="btn btn-ghost"
+                style={{ height: 30 }}
+                onClick={() => {
+                  setPreviewView('TOP');
+                  setMode('interview');
+                }}
+              >
+                ← INTERVIEW
+              </button>
+              <button
                 className="btn btn-secondary"
                 style={{ height: 30 }}
                 onClick={() => navigate('/robots')}
@@ -334,6 +443,7 @@ export default function Hardware() {
                 <SliderField
                   label="Mass"
                   unit="kg"
+                  info="mass"
                   value={c.mass_kg}
                   min={0.1}
                   max={1.5}
@@ -344,6 +454,7 @@ export default function Hardware() {
                 <SliderField
                   label="Body length (no wedge)"
                   unit="m"
+                  info="body_length"
                   value={c.length_m}
                   min={0.04}
                   max={0.15}
@@ -353,6 +464,7 @@ export default function Hardware() {
                 <SliderField
                   label="Width"
                   unit="m"
+                  info="width"
                   value={c.width_m}
                   min={0.04}
                   max={0.15}
@@ -362,6 +474,7 @@ export default function Hardware() {
                 <SliderField
                   label="Height"
                   unit="m"
+                  info="height"
                   value={c.height_m}
                   min={0.02}
                   max={0.12}
@@ -370,6 +483,7 @@ export default function Hardware() {
                 />
                 <SliderField
                   label="Chassis friction"
+                  info="chassis_friction"
                   value={c.chassis_friction}
                   min={0}
                   max={2}
@@ -379,6 +493,7 @@ export default function Hardware() {
                 />
                 <SliderField
                   label="Wheel friction"
+                  info="wheel_friction"
                   value={c.wheel_friction}
                   min={0}
                   max={4}
@@ -392,12 +507,14 @@ export default function Hardware() {
                 className="mt-3 rounded border p-3"
                 style={{ borderColor: 'var(--line)', background: 'var(--bg-2)' }}
               >
-                <span className="micro text-fg-2" style={{ fontSize: 9 }}>
+                <span className="micro inline-flex items-center gap-1.5 text-fg-2" style={{ fontSize: 9 }}>
                   CENTER OF MASS · m
+                  <Info topic="com" />
                 </span>
                 <div className="mt-2 grid grid-cols-3 gap-x-4 gap-y-3">
                   <SliderField
                     label="CoM x"
+                    info="com_x"
                     value={c.com_xyz[0]}
                     min={-0.05}
                     max={0.05}
@@ -407,6 +524,7 @@ export default function Hardware() {
                   />
                   <SliderField
                     label="CoM y"
+                    info="com_y"
                     value={c.com_xyz[1]}
                     min={-0.05}
                     max={0.05}
@@ -416,6 +534,7 @@ export default function Hardware() {
                   />
                   <SliderField
                     label="CoM z"
+                    info="com_z"
                     value={c.com_xyz[2]}
                     min={-0.02}
                     max={0.06}
@@ -434,24 +553,27 @@ export default function Hardware() {
               live
               ticks
               right={
-                <button
-                  className="micro"
-                  onClick={toggleWedge}
-                  style={{
-                    fontSize: 10,
-                    letterSpacing: '.06em',
-                    padding: '3px 9px',
-                    borderRadius: 'var(--radius)',
-                    border: '1px solid var(--line-2)',
-                    background: c.wedge_present
-                      ? 'var(--accent)'
-                      : 'var(--bg-2)',
-                    color: c.wedge_present ? 'var(--bg-0)' : 'var(--fg-1)',
-                    cursor: 'pointer',
-                  }}
-                >
-                  {c.wedge_present ? 'PRESENT' : 'ABSENT'}
-                </button>
+                <span className="flex items-center gap-2">
+                  <Info topic="wedge" />
+                  <button
+                    className="micro"
+                    onClick={toggleWedge}
+                    style={{
+                      fontSize: 10,
+                      letterSpacing: '.06em',
+                      padding: '3px 9px',
+                      borderRadius: 'var(--radius)',
+                      border: '1px solid var(--line-2)',
+                      background: c.wedge_present
+                        ? 'var(--accent)'
+                        : 'var(--bg-2)',
+                      color: c.wedge_present ? 'var(--bg-0)' : 'var(--fg-1)',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    {c.wedge_present ? 'PRESENT' : 'ABSENT'}
+                  </button>
+                </span>
               }
             >
               <div
@@ -461,6 +583,7 @@ export default function Hardware() {
                 <SliderField
                   label="Wedge length"
                   unit="m"
+                  info="wedge_length"
                   value={c.wedge_length_m}
                   min={0.0}
                   max={0.08}
@@ -471,6 +594,7 @@ export default function Hardware() {
                 <SliderField
                   label="Wedge low edge height"
                   unit="m"
+                  info="wedge_low_height"
                   value={c.wedge_low_height_m}
                   min={0.0}
                   max={0.04}
@@ -481,6 +605,7 @@ export default function Hardware() {
                 <SliderField
                   label="Wedge high edge height"
                   unit="m"
+                  info="wedge_high_height"
                   value={c.wedge_high_height_m}
                   min={0.0}
                   max={0.06}
@@ -498,6 +623,7 @@ export default function Hardware() {
                 <SliderField
                   label="Wheel Radius"
                   unit="m"
+                  info="wheel_radius"
                   value={dt.wheel_radius_m}
                   min={0.005}
                   max={0.03}
@@ -508,6 +634,7 @@ export default function Hardware() {
                 <SliderField
                   label="Track Width"
                   unit="m"
+                  info="track_width"
                   value={dt.track_width_m}
                   min={0.04}
                   max={0.14}
@@ -518,6 +645,7 @@ export default function Hardware() {
                 <SliderField
                   label="Wheel X Offset"
                   unit="m"
+                  info="wheel_x_offset"
                   value={dt.wheel_x_offset_m}
                   min={-0.06}
                   max={0.06}
@@ -528,6 +656,7 @@ export default function Hardware() {
                 <SliderField
                   label="Max Torque"
                   unit="N·m"
+                  info="max_torque"
                   value={dt.max_torque_nm}
                   min={0.02}
                   max={0.5}
@@ -538,6 +667,7 @@ export default function Hardware() {
                 <SliderField
                   label="Max Omega"
                   unit="rad/s"
+                  info="max_omega"
                   value={dt.max_omega_rad_s}
                   min={5}
                   max={80}
@@ -555,6 +685,7 @@ export default function Hardware() {
                 <SliderField
                   label="Radius"
                   unit="m"
+                  info="dohyo_radius"
                   value={spec.dohyo.radius_m}
                   min={0.1}
                   max={0.8}
@@ -565,6 +696,7 @@ export default function Hardware() {
                 <SliderField
                   label="Border width"
                   unit="m"
+                  info="dohyo_border"
                   value={spec.dohyo.border_width_m}
                   min={0.005}
                   max={0.1}
@@ -582,13 +714,16 @@ export default function Hardware() {
               live
               ticks
               right={
-                <button
-                  className="btn btn-secondary"
-                  style={{ height: 26 }}
-                  onClick={addSensor}
-                >
-                  + Add ToF
-                </button>
+                <span className="flex items-center gap-2">
+                  <Info topic="tof_sensor" />
+                  <button
+                    className="btn btn-secondary"
+                    style={{ height: 26 }}
+                    onClick={addSensor}
+                  >
+                    + Add ToF
+                  </button>
+                </span>
               }
             >
               <div className="flex flex-col gap-3">
@@ -626,6 +761,7 @@ export default function Hardware() {
                       <SliderField
                         label="Mount x (fwd)"
                         unit="m"
+                        info="tof_mount"
                         value={s.mount_xyz[0]}
                         min={-0.08}
                         max={0.08}
@@ -640,6 +776,7 @@ export default function Hardware() {
                       <SliderField
                         label="Mount y (left)"
                         unit="m"
+                        info="tof_mount"
                         value={s.mount_xyz[1]}
                         min={-0.06}
                         max={0.06}
@@ -654,6 +791,7 @@ export default function Hardware() {
                       <SliderField
                         label="Mount z (up)"
                         unit="m"
+                        info="tof_mount"
                         value={s.mount_xyz[2]}
                         min={-0.02}
                         max={0.06}
@@ -668,6 +806,7 @@ export default function Hardware() {
                       <SliderField
                         label="Range"
                         unit="m"
+                        info="tof_range"
                         value={s.range_m}
                         min={0.2}
                         max={2.0}
@@ -683,6 +822,7 @@ export default function Hardware() {
                         <SliderField
                           label="Angle (yaw)"
                           unit="rad"
+                          info="tof_angle"
                           value={s.angle_rad}
                           min={-Math.PI}
                           max={Math.PI}
@@ -708,13 +848,16 @@ export default function Hardware() {
               live
               ticks
               right={
-                <button
-                  className="btn btn-secondary"
-                  style={{ height: 26 }}
-                  onClick={addLine}
-                >
-                  + Add Line
-                </button>
+                <span className="flex items-center gap-2">
+                  <Info topic="line_sensor" />
+                  <button
+                    className="btn btn-secondary"
+                    style={{ height: 26 }}
+                    onClick={addLine}
+                  >
+                    + Add Line
+                  </button>
+                </span>
               }
             >
               <div className="flex flex-col gap-3">
@@ -747,6 +890,7 @@ export default function Hardware() {
                       <SliderField
                         label="Mount x (fwd)"
                         unit="m"
+                        info="line_mount"
                         value={l.mount_xy[0]}
                         min={-0.08}
                         max={0.08}
@@ -757,6 +901,7 @@ export default function Hardware() {
                       <SliderField
                         label="Mount y (left)"
                         unit="m"
+                        info="line_mount"
                         value={l.mount_xy[1]}
                         min={-0.08}
                         max={0.08}
@@ -785,6 +930,8 @@ export default function Hardware() {
               spec={spec}
               loading={geomLoading}
               error={geomError}
+              view={previewView}
+              onViewChange={setPreviewView}
             />
           </Reveal>
 
@@ -815,11 +962,13 @@ export default function Hardware() {
                   <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
                     <Readout
                       label="OBS DIM"
+                      info="obs_dim"
                       value={String(validation.obs_dim)}
                       tone="cyan"
                     />
                     <Readout
                       label="ACTION DIM"
+                      info="action_dim"
                       value={String(validation.action_dim)}
                       tone="accent"
                     />
@@ -830,6 +979,7 @@ export default function Hardware() {
                     />
                     <Readout
                       label="SIGNATURE"
+                      info="signature"
                       value={validation.obs_signature_hash || '—'}
                     />
                   </div>
@@ -856,9 +1006,10 @@ export default function Hardware() {
                   )}
 
                   <div className="mt-4">
-                    <span className="micro text-fg-2">
+                    <span className="micro inline-flex items-center gap-1.5 text-fg-2">
                       FINETUNE CANDIDATES ·{' '}
                       {validation.finetune_candidates.length}
+                      <Info topic="finetune" />
                     </span>
                     {validation.finetune_candidates.length === 0 ? (
                       <p
