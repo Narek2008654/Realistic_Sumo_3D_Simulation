@@ -1,0 +1,4 @@
+# Web stack for the LITE backend (in addition to the core requirements.txt).
+# Already present in the `sumo` conda env.
+fastapi
+uvicorn[standard]

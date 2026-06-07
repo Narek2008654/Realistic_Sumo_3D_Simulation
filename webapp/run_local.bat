@@ -1,0 +1,12 @@
+@echo off
+REM Launch the LITE backend locally (no auth, no DB).
+REM Activates the sumo conda env so torch/pybullet DLLs resolve, then serves
+REM the FastAPI app with autoreload on 127.0.0.1:8000.
+
+call C:\Users\User\miniforge3\Scripts\activate.bat sumo
+set KMP_DUPLICATE_LIB_OK=TRUE
+
+REM Run from the repo root (one level up from this script's dir).
+pushd "%~dp0.."
+python -m uvicorn webapp.backend.app:app --host 127.0.0.1 --port 8000 --reload
+popd

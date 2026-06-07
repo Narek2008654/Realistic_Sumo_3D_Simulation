@@ -35,6 +35,9 @@ checkpoints/*.pt
 !checkpoints/dqn_3d_bc_oldphys_best.pt
 # BC datasets are large + regenerable in Phase 0a (~5 min each).
 data/*.npz
+# LITE backend local caches/artifacts (regenerable; never committed).
+data/registry/
+data/jobs/
 # Training logs.
 logs/
 *.log
