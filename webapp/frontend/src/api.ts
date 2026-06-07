@@ -65,4 +65,9 @@ export const api = {
 
   finetuneCandidates: (id: string) =>
     request<ModelCard[]>(`/api/models/${id}/finetune-candidates`),
+
+  // Slow: runs a real PyBullet eval on the backend and returns the card with
+  // metrics populated. Triggered explicitly from the UI, never on list load.
+  evaluate: (id: string) =>
+    request<ModelCard>(`/api/models/${id}/evaluate`, { method: 'POST' }),
 };

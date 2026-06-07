@@ -55,9 +55,38 @@ function WinRateBar({ frac }: { frac: number | null }) {
   );
 }
 
-function ModelCardView({ card }: { card: ModelCard }) {
+function formatTs(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleString(undefined, {
+    year: 'numeric',
+    month: 'short',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
+function ModelCardView({ card: initial }: { card: ModelCard }) {
+  const [card, setCard] = useState<ModelCard>(initial);
+  const [evaluating, setEvaluating] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
   const wr = winRateFraction(card);
   const selfOut = metricNumber(card.metrics, ['self_out_rate', 'self_out%']);
+  const evaluated = card.metrics != null;
+
+  async function runEval() {
+    setEvaluating(true);
+    setErr(null);
+    try {
+      setCard(await api.evaluate(card.id));
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : 'eval failed');
+    } finally {
+      setEvaluating(false);
+    }
+  }
+
   return (
     <Panel
       title={card.id}
@@ -81,9 +110,30 @@ function ModelCardView({ card }: { card: ModelCard }) {
         <span className="micro text-fg-2" style={{ fontSize: 9 }}>
           WIN RATE
         </span>
-        <WinRateBar frac={wr} />
+        {evaluated ? (
+          <WinRateBar frac={wr} />
+        ) : (
+          <button
+            onClick={runEval}
+            disabled={evaluating}
+            title="Runs a PyBullet eval on the backend (slow)"
+            className="micro"
+            style={{
+              fontSize: 10,
+              letterSpacing: '.06em',
+              padding: '3px 8px',
+              borderRadius: 'var(--radius)',
+              border: '1px solid var(--line-2)',
+              background: 'var(--bg-2)',
+              color: evaluating ? 'var(--fg-2)' : 'var(--accent)',
+              cursor: evaluating ? 'default' : 'pointer',
+            }}
+          >
+            {evaluating ? 'EVALUATING…' : 'NOT EVALUATED · RUN'}
+          </button>
+        )}
       </div>
-      {selfOut != null && (
+      {evaluated && selfOut != null && (
         <div className="mt-1.5 flex items-center justify-between">
           <span className="micro text-fg-2" style={{ fontSize: 9 }}>
             SELF-OUT
@@ -93,12 +143,17 @@ function ModelCardView({ card }: { card: ModelCard }) {
           </span>
         </div>
       )}
+      {err && (
+        <div className="num mt-1.5" style={{ fontSize: 10, color: 'var(--loss)' }}>
+          {err}
+        </div>
+      )}
       <div
         className="num mt-3 truncate text-fg-2"
         style={{ fontSize: 10 }}
         title={card.obs_signature_hash ?? ''}
       >
-        sig {card.obs_signature_hash ?? '—'} · {card.created_at}
+        sig {card.obs_signature_hash ?? '—'} · {formatTs(card.created_at)}
       </div>
     </Panel>
   );
