@@ -13,7 +13,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from webapp.backend import config
-from webapp.backend.routers import assets, hardware, models, robots
+from webapp.backend.routers import assets, hardware, models, robots, training
 
 app = FastAPI(
     title="Realistic Sumo 3D — LITE backend",
@@ -35,6 +35,7 @@ app.include_router(hardware.router)
 app.include_router(models.router)
 app.include_router(assets.router)
 app.include_router(robots.router)
+app.include_router(training.router)
 
 
 @app.on_event("startup")
