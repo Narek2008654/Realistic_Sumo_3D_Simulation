@@ -37,9 +37,18 @@ def _two_compatible_model_ids() -> list[str]:
 
 
 def test_concurrent_evaluate_does_not_crash() -> None:
+    import shutil
+    import tempfile
+    from webapp.backend import config
+
     # Shrink the eval so the test is quick; the concurrency path is unchanged.
     registry._EVAL_OPPONENTS = ("dodger",)
     registry._EVAL_N = 2
+
+    # Redirect the registry cache to a throwaway dir so this fast, tiny-n eval
+    # never pollutes the real data/registry/ cards the UI reads.
+    orig_registry_dir = config.REGISTRY_DIR
+    config.REGISTRY_DIR = Path(tempfile.mkdtemp(prefix="reg_eval_test_"))
 
     ids = _two_compatible_model_ids()
     results: dict[str, object] = {}
@@ -51,11 +60,15 @@ def test_concurrent_evaluate_does_not_crash() -> None:
         except BaseException as exc:  # noqa: BLE001 - capture any crash
             errors[model_id] = exc
 
-    threads = [threading.Thread(target=run, args=(mid,)) for mid in ids]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
+    try:
+        threads = [threading.Thread(target=run, args=(mid,)) for mid in ids]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+    finally:
+        shutil.rmtree(config.REGISTRY_DIR, ignore_errors=True)
+        config.REGISTRY_DIR = orig_registry_dir
 
     assert not errors, f"concurrent evaluate raised: {errors}"
     for mid in ids:

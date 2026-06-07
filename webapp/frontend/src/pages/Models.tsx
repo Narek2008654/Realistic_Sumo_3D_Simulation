@@ -271,28 +271,47 @@ function ModelCardView({ card: initial }: { card: ModelCard }) {
 
           <PerOpponentBreakdown card={card} />
 
-          {mode === 'quick' && (
-            <div className="mt-3 flex justify-end">
-              <button
-                onClick={() => runEval('full')}
-                disabled={running != null}
-                title="Re-run against the full gauntlet (whole zoo + held-out, slow)"
-                className="micro"
-                style={{
-                  fontSize: 10,
-                  letterSpacing: '.06em',
-                  padding: '3px 8px',
-                  borderRadius: 'var(--radius)',
-                  border: '1px solid var(--cyan-dim)',
-                  background: 'var(--bg-2)',
-                  color: running ? 'var(--fg-2)' : 'var(--cyan)',
-                  cursor: running ? 'default' : 'pointer',
-                }}
-              >
-                {running === 'full' ? 'RUNNING FULL…' : 'RUN FULL →'}
-              </button>
-            </div>
-          )}
+          <div className="mt-3 flex items-center justify-end gap-2">
+            <span className="micro text-fg-2" style={{ fontSize: 9 }}>
+              RE-EVAL
+            </span>
+            <button
+              onClick={() => runEval('quick')}
+              disabled={running != null}
+              title="Re-run the quick 3-opponent probe"
+              className="micro"
+              style={{
+                fontSize: 10,
+                letterSpacing: '.06em',
+                padding: '3px 8px',
+                borderRadius: 'var(--radius)',
+                border: '1px solid var(--line-2)',
+                background: 'var(--bg-2)',
+                color: running ? 'var(--fg-2)' : 'var(--accent)',
+                cursor: running ? 'default' : 'pointer',
+              }}
+            >
+              {running === 'quick' ? 'QUICK…' : 'QUICK'}
+            </button>
+            <button
+              onClick={() => runEval('full')}
+              disabled={running != null}
+              title="Re-run the full gauntlet (whole zoo + held-out, slow)"
+              className="micro"
+              style={{
+                fontSize: 10,
+                letterSpacing: '.06em',
+                padding: '3px 8px',
+                borderRadius: 'var(--radius)',
+                border: '1px solid var(--cyan-dim)',
+                background: 'var(--bg-2)',
+                color: running ? 'var(--fg-2)' : 'var(--cyan)',
+                cursor: running ? 'default' : 'pointer',
+              }}
+            >
+              {running === 'full' ? 'FULL…' : 'FULL'}
+            </button>
+          </div>
         </>
       ) : (
         <div className="mt-3">
