@@ -10,7 +10,7 @@
 
 import { AnimatePresence, motion } from 'framer-motion';
 import { useEffect, useState } from 'react';
-import { SliderField } from './fields';
+import { SliderField, clamp, positionBounds } from './fields';
 import { Info } from './Info';
 import { CornerTicks } from './ui';
 import type { DistanceSensor, HardwareSpec, PreviewView } from '../types';
@@ -106,6 +106,7 @@ function ToFEditor({
 }) {
   const s = spec.distance_sensors[i];
   if (!s) return null;
+  const pb = positionBounds(spec.chassis);
   return (
     <div
       className="rounded border p-3"
@@ -120,33 +121,33 @@ function ToFEditor({
           unit="m"
           info="tof_mount"
           value={s.mount_xyz[0]}
-          min={-0.08}
-          max={0.08}
+          min={pb.tofX.min}
+          max={pb.tofX.max}
           step={0.0005}
           format={(v) => v.toFixed(4)}
-          onChange={(v) => u.setSensor(i, (sn) => { sn.mount_xyz[0] = v; })}
+          onChange={(v) => u.setSensor(i, (sn) => { sn.mount_xyz[0] = clamp(v, pb.tofX.min, pb.tofX.max); })}
         />
         <SliderField
           label="Mount y (left)"
           unit="m"
           info="tof_mount"
           value={s.mount_xyz[1]}
-          min={-0.06}
-          max={0.06}
+          min={pb.tofY.min}
+          max={pb.tofY.max}
           step={0.0005}
           format={(v) => v.toFixed(4)}
-          onChange={(v) => u.setSensor(i, (sn) => { sn.mount_xyz[1] = v; })}
+          onChange={(v) => u.setSensor(i, (sn) => { sn.mount_xyz[1] = clamp(v, pb.tofY.min, pb.tofY.max); })}
         />
         <SliderField
           label="Mount z (up)"
           unit="m"
           info="tof_mount"
           value={s.mount_xyz[2]}
-          min={-0.02}
-          max={0.06}
+          min={pb.tofZ.min}
+          max={pb.tofZ.max}
           step={0.0005}
           format={(v) => v.toFixed(4)}
-          onChange={(v) => u.setSensor(i, (sn) => { sn.mount_xyz[2] = v; })}
+          onChange={(v) => u.setSensor(i, (sn) => { sn.mount_xyz[2] = clamp(v, pb.tofZ.min, pb.tofZ.max); })}
         />
         <SliderField
           label="Range"
@@ -192,6 +193,7 @@ function LineEditor({
 }) {
   const l = spec.line_sensors[i];
   if (!l) return null;
+  const pb = positionBounds(spec.chassis);
   return (
     <div
       className="rounded border p-3"
@@ -206,22 +208,22 @@ function LineEditor({
           unit="m"
           info="line_mount"
           value={l.mount_xy[0]}
-          min={-0.08}
-          max={0.08}
+          min={pb.lineX.min}
+          max={pb.lineX.max}
           step={0.0005}
           format={(v) => v.toFixed(4)}
-          onChange={(v) => u.setLine(i, 0, v)}
+          onChange={(v) => u.setLine(i, 0, clamp(v, pb.lineX.min, pb.lineX.max))}
         />
         <SliderField
           label="Mount y (left)"
           unit="m"
           info="line_mount"
           value={l.mount_xy[1]}
-          min={-0.08}
-          max={0.08}
+          min={pb.lineY.min}
+          max={pb.lineY.max}
           step={0.0005}
           format={(v) => v.toFixed(4)}
-          onChange={(v) => u.setLine(i, 1, v)}
+          onChange={(v) => u.setLine(i, 1, clamp(v, pb.lineY.min, pb.lineY.max))}
         />
       </div>
     </div>
@@ -449,6 +451,7 @@ const STEPS: StepDef[] = [
     view: 'TOP',
     render: (spec, u) => {
       const c = spec.chassis;
+      const pb = positionBounds(c);
       return (
         <div className="grid grid-cols-1 gap-x-4 gap-y-4 sm:grid-cols-3">
           <SliderField
@@ -456,33 +459,33 @@ const STEPS: StepDef[] = [
             unit="m"
             info="com_x"
             value={c.com_xyz[0]}
-            min={-0.05}
-            max={0.05}
+            min={pb.comX.min}
+            max={pb.comX.max}
             step={0.0005}
             format={(v) => v.toFixed(4)}
-            onChange={(v) => u.setCom(0, v)}
+            onChange={(v) => u.setCom(0, clamp(v, pb.comX.min, pb.comX.max))}
           />
           <SliderField
             label="Left / right (y)"
             unit="m"
             info="com_y"
             value={c.com_xyz[1]}
-            min={-0.05}
-            max={0.05}
+            min={pb.comY.min}
+            max={pb.comY.max}
             step={0.0005}
             format={(v) => v.toFixed(4)}
-            onChange={(v) => u.setCom(1, v)}
+            onChange={(v) => u.setCom(1, clamp(v, pb.comY.min, pb.comY.max))}
           />
           <SliderField
             label="Up / down (z)"
             unit="m"
             info="com_z"
             value={c.com_xyz[2]}
-            min={-0.02}
-            max={0.06}
+            min={pb.comZ.min}
+            max={pb.comZ.max}
             step={0.0005}
             format={(v) => v.toFixed(4)}
-            onChange={(v) => u.setCom(2, v)}
+            onChange={(v) => u.setCom(2, clamp(v, pb.comZ.min, pb.comZ.max))}
           />
         </div>
       );

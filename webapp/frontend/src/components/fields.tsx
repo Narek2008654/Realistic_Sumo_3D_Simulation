@@ -1,6 +1,45 @@
 // Compact labelled form controls with mono numeric readouts.
 import { useEffect, useState } from 'react';
 import { Info } from './Info';
+import type { Chassis } from '../types';
+
+/** Clamp ``v`` to the inclusive ``[min, max]`` range. */
+export function clamp(v: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, v));
+}
+
+/**
+ * Live position bounds for placeable points (center of mass + sensor mounts),
+ * derived from the current chassis dimensions so a placed point's x/y/z always
+ * stays within the robot body. Recompute whenever the chassis dims change.
+ *
+ * Body frame: x forward, y left, z up; the chassis box is centered on the
+ * origin in x/y and sits on the wheels (bottom at z=0). A tiny epsilon keeps
+ * the exact edge reachable by the slider step / typed value.
+ *
+ * - x: body spans [-length/2, +length/2]. ToF mounts may reach the front tip
+ *   including the wedge, so their max extends by wedge_length when present.
+ * - y: [-width/2, +width/2] for all mounts + CoM.
+ * - z: [0, height] for CoM and ToF mounts (line sensors sit on the underside
+ *   and are not z-editable).
+ */
+export function positionBounds(chassis: Chassis) {
+  const eps = 1e-4;
+  const halfLen = chassis.length_m / 2;
+  const halfWidth = chassis.width_m / 2;
+  const height = chassis.height_m;
+  const wedge = chassis.wedge_present ? chassis.wedge_length_m : 0;
+  return {
+    comX: { min: -halfLen - eps, max: halfLen + eps },
+    comY: { min: -halfWidth - eps, max: halfWidth + eps },
+    comZ: { min: 0 - eps, max: height + eps },
+    tofX: { min: -halfLen - eps, max: halfLen + wedge + eps },
+    tofY: { min: -halfWidth - eps, max: halfWidth + eps },
+    tofZ: { min: 0 - eps, max: height + eps },
+    lineX: { min: -halfLen - eps, max: halfLen + eps },
+    lineY: { min: -halfWidth - eps, max: halfWidth + eps },
+  };
+}
 
 export function NumberField({
   label,

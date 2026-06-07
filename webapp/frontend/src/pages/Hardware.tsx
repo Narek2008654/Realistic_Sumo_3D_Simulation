@@ -7,7 +7,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api, ApiError } from '../api';
-import { Readout, SliderField } from '../components/fields';
+import { Readout, SliderField, clamp, positionBounds } from '../components/fields';
 import { Interview, type SpecUpdaters } from '../components/Interview';
 import { RobotPreview } from '../components/RobotPreview';
 import { Info } from '../components/Info';
@@ -299,6 +299,10 @@ export default function Hardware() {
 
   const c = spec.chassis;
   const dt = spec.drivetrain;
+  // Live position bounds derived from the chassis dims — keep CoM/sensor mounts
+  // inside the robot body. Recomputed every render so editing the body resizes
+  // these ranges immediately.
+  const pb = positionBounds(c);
 
   // INTERVIEW MODE — guided wizard on the left, persistent preview on the right.
   if (mode === 'interview') {
@@ -516,31 +520,31 @@ export default function Hardware() {
                     label="CoM x"
                     info="com_x"
                     value={c.com_xyz[0]}
-                    min={-0.05}
-                    max={0.05}
+                    min={pb.comX.min}
+                    max={pb.comX.max}
                     step={0.0005}
                     format={(v) => v.toFixed(4)}
-                    onChange={(v) => setCom(0, v)}
+                    onChange={(v) => setCom(0, clamp(v, pb.comX.min, pb.comX.max))}
                   />
                   <SliderField
                     label="CoM y"
                     info="com_y"
                     value={c.com_xyz[1]}
-                    min={-0.05}
-                    max={0.05}
+                    min={pb.comY.min}
+                    max={pb.comY.max}
                     step={0.0005}
                     format={(v) => v.toFixed(4)}
-                    onChange={(v) => setCom(1, v)}
+                    onChange={(v) => setCom(1, clamp(v, pb.comY.min, pb.comY.max))}
                   />
                   <SliderField
                     label="CoM z"
                     info="com_z"
                     value={c.com_xyz[2]}
-                    min={-0.02}
-                    max={0.06}
+                    min={pb.comZ.min}
+                    max={pb.comZ.max}
                     step={0.0005}
                     format={(v) => v.toFixed(4)}
-                    onChange={(v) => setCom(2, v)}
+                    onChange={(v) => setCom(2, clamp(v, pb.comZ.min, pb.comZ.max))}
                   />
                 </div>
               </div>
@@ -763,13 +767,13 @@ export default function Hardware() {
                         unit="m"
                         info="tof_mount"
                         value={s.mount_xyz[0]}
-                        min={-0.08}
-                        max={0.08}
+                        min={pb.tofX.min}
+                        max={pb.tofX.max}
                         step={0.0005}
                         format={(v) => v.toFixed(4)}
                         onChange={(v) =>
                           setSensor(i, (sn) => {
-                            sn.mount_xyz[0] = v;
+                            sn.mount_xyz[0] = clamp(v, pb.tofX.min, pb.tofX.max);
                           })
                         }
                       />
@@ -778,13 +782,13 @@ export default function Hardware() {
                         unit="m"
                         info="tof_mount"
                         value={s.mount_xyz[1]}
-                        min={-0.06}
-                        max={0.06}
+                        min={pb.tofY.min}
+                        max={pb.tofY.max}
                         step={0.0005}
                         format={(v) => v.toFixed(4)}
                         onChange={(v) =>
                           setSensor(i, (sn) => {
-                            sn.mount_xyz[1] = v;
+                            sn.mount_xyz[1] = clamp(v, pb.tofY.min, pb.tofY.max);
                           })
                         }
                       />
@@ -793,13 +797,13 @@ export default function Hardware() {
                         unit="m"
                         info="tof_mount"
                         value={s.mount_xyz[2]}
-                        min={-0.02}
-                        max={0.06}
+                        min={pb.tofZ.min}
+                        max={pb.tofZ.max}
                         step={0.0005}
                         format={(v) => v.toFixed(4)}
                         onChange={(v) =>
                           setSensor(i, (sn) => {
-                            sn.mount_xyz[2] = v;
+                            sn.mount_xyz[2] = clamp(v, pb.tofZ.min, pb.tofZ.max);
                           })
                         }
                       />
@@ -892,22 +896,22 @@ export default function Hardware() {
                         unit="m"
                         info="line_mount"
                         value={l.mount_xy[0]}
-                        min={-0.08}
-                        max={0.08}
+                        min={pb.lineX.min}
+                        max={pb.lineX.max}
                         step={0.0005}
                         format={(v) => v.toFixed(4)}
-                        onChange={(v) => setLine(i, 0, v)}
+                        onChange={(v) => setLine(i, 0, clamp(v, pb.lineX.min, pb.lineX.max))}
                       />
                       <SliderField
                         label="Mount y (left)"
                         unit="m"
                         info="line_mount"
                         value={l.mount_xy[1]}
-                        min={-0.08}
-                        max={0.08}
+                        min={pb.lineY.min}
+                        max={pb.lineY.max}
                         step={0.0005}
                         format={(v) => v.toFixed(4)}
-                        onChange={(v) => setLine(i, 1, v)}
+                        onChange={(v) => setLine(i, 1, clamp(v, pb.lineY.min, pb.lineY.max))}
                       />
                     </div>
                   </div>
