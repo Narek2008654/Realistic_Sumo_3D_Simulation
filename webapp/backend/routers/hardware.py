@@ -51,7 +51,6 @@ def _urdf_loads_in_pybullet(urdf_str: str) -> tuple[bool, str | None]:
     except Exception as exc:  # pybullet missing / DLL issue
         return False, f"pybullet import failed: {exc}"
 
-    client = -1
     tmp_path: Path | None = None
     try:
         # PyBullet's loadURDF wants a file path, not a string.
