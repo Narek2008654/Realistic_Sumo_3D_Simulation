@@ -77,6 +77,12 @@ def _urdf_loads_in_pybullet(urdf_str: str) -> tuple[bool, str | None]:
             tmp_path.unlink(missing_ok=True)
 
 
+@router.get("/default")
+def default() -> dict[str, Any]:
+    """The canonical robot's HardwareSpec as a plain dict (seeds the UI form)."""
+    return HardwareSpec.default().to_dict()
+
+
 @router.post("/validate")
 def validate(body: dict[str, Any] = Body(...)) -> dict[str, Any]:
     """Validate a HardwareSpec: dims, signature, URDF load, candidates."""
