@@ -604,6 +604,16 @@ class MiniSumoEnv(gym.Env):
         # Gymnasium's reserved EnvSpec slot — shadowing it breaks str(env),
         # gym.make registration, and Wrapper.spec).
         self.hw_spec = hardware_spec if hardware_spec is not None else HardwareSpec.default()
+        # E1c: the AGENT's wheel motor caps come from the spec's drivetrain.
+        # Defaults equal the module constants AGENT_MAX_FORCE/AGENT_MAX_RAD
+        # (== WHEEL_MAX_TORQUE/WHEEL_OMEGA_FWD), so behaviour is unchanged.
+        # NOTE: opponent (NovaMax) caps are NOT driven by this — they stay on
+        # the NOVAMAX_* constants (a later opponent-hardware feature).
+        self._agent_max_torque = self.hw_spec.drivetrain.max_torque_nm
+        self._agent_max_omega = self.hw_spec.drivetrain.max_omega_rad_s
+        # E1d: terminal reward magnitudes come from the spec's reward table.
+        # Defaults equal REWARD_WIN/LOSE_PUSH/LOSE_MUTUAL/LOSE_SELF/TIMEOUT.
+        self._rw = dict(self.hw_spec.reward.terminal)
         # alg/improvment: dense edge-avoidance shaping to cut self-outs
         # (the dominant loss mode at high mult). Off by default.
         self.edge_avoid_reward = bool(edge_avoid_reward)
@@ -1235,7 +1245,7 @@ class MiniSumoEnv(gym.Env):
 
     def _apply_motor_velocities(self, left_cmd: float, right_cmd: float) -> None:
         # Per-episode "battery sag" on the wheel-velocity cap.
-        cap = WHEEL_OMEGA_FWD * self._velocity_factor
+        cap = self._agent_max_omega * self._velocity_factor
         left_omega = left_cmd * cap
         right_omega = right_cmd * cap
 
@@ -1245,8 +1255,8 @@ class MiniSumoEnv(gym.Env):
         # active-brake that exceeded the agent's push capacity, making it
         # impossible to shove an idle opponent off the dohyo. Threshold
         # tolerates float noise in continuous commands (NovaMax outputs).
-        left_force  = WHEEL_MAX_TORQUE if abs(left_cmd)  > 0.05 else 0.0
-        right_force = WHEEL_MAX_TORQUE if abs(right_cmd) > 0.05 else 0.0
+        left_force  = self._agent_max_torque if abs(left_cmd)  > 0.05 else 0.0
+        right_force = self._agent_max_torque if abs(right_cmd) > 0.05 else 0.0
         p.setJointMotorControl2(
             bodyUniqueId=self.robot_id, jointIndex=self._left_wheel_idx,
             controlMode=p.VELOCITY_CONTROL,
@@ -1806,20 +1816,20 @@ class MiniSumoEnv(gym.Env):
             terminated = True
             distances = [None, None, None]
             if enemy_out and not agent_out:
-                terminal = REWARD_WIN
+                terminal = self._rw["win"]
                 termination_reason = "win"
             else:
                 # Loss reward varies by reason: self-out is hardest punished
                 # because the agent had full control over not driving off.
                 if agent_out and enemy_out:
                     termination_reason = "mutual_out"
-                    terminal = REWARD_LOSE_MUTUAL
+                    terminal = self._rw["lose_mutual"]
                 elif self._steps - self._last_contact_step <= CONTACT_RECENT_STEPS:
                     termination_reason = "push_loss"
-                    terminal = REWARD_LOSE_PUSH
+                    terminal = self._rw["lose_push"]
                 else:
                     termination_reason = "self_out"
-                    terminal = REWARD_LOSE_SELF
+                    terminal = self._rw["lose_self"]
         else:
             distances = self._raw_distances()
             # front_norm drives the engagement timer (obs feature). The
@@ -2006,7 +2016,7 @@ class MiniSumoEnv(gym.Env):
         self._steps += 1
         truncated = (not terminated) and (self._steps >= MAX_EPISODE_STEPS)
         if truncated:
-            terminal = REWARD_TIMEOUT
+            terminal = self._rw["timeout"]
             termination_reason = "timeout"
 
         # Run 8: per-step time cost added to break the "do nothing"
