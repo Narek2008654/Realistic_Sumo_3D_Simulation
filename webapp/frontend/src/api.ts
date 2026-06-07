@@ -2,6 +2,7 @@
 // Vite dev proxy (/api -> http://127.0.0.1:8000), so paths are relative.
 
 import type {
+  EvalMode,
   Geometry,
   HardwareSpec,
   ModelCard,
@@ -76,8 +77,11 @@ export const api = {
 
   // Slow: runs a real PyBullet eval on the backend and returns the card with
   // metrics populated. Triggered explicitly from the UI, never on list load.
-  evaluate: (id: string) =>
-    request<ModelCard>(`/api/models/${id}/evaluate`, { method: 'POST' }),
+  // mode=quick (default) = 3-opponent probe; mode=full = whole zoo + held-out.
+  evaluate: (id: string, mode: EvalMode = 'quick') =>
+    request<ModelCard>(`/api/models/${id}/evaluate?mode=${mode}`, {
+      method: 'POST',
+    }),
 
   // ---- Saved robots --------------------------------------------------------
   saveRobot: (name: string, spec: HardwareSpec) =>

@@ -2,7 +2,7 @@
 import { useEffect, useState } from 'react';
 import { api, ApiError } from '../api';
 import { Panel, Reveal, StatusDot } from '../components/ui';
-import type { ModelCard } from '../types';
+import type { EvalMode, ModelCard } from '../types';
 
 function metricNumber(
   metrics: ModelCard['metrics'],
@@ -28,7 +28,13 @@ function winRateFraction(card: ModelCard): number | null {
   return wr > 1 ? wr / 100 : wr;
 }
 
-function WinRateBar({ frac }: { frac: number | null }) {
+function WinRateBar({
+  frac,
+  trackWidth = 80,
+}: {
+  frac: number | null;
+  trackWidth?: number;
+}) {
   if (frac == null) {
     return <span className="num text-fg-2">—</span>;
   }
@@ -36,8 +42,8 @@ function WinRateBar({ frac }: { frac: number | null }) {
   return (
     <div className="flex items-center gap-2">
       <div
-        className="h-1.5 w-20 overflow-hidden rounded"
-        style={{ background: 'var(--bg-3)' }}
+        className="h-1.5 overflow-hidden rounded"
+        style={{ background: 'var(--bg-3)', width: trackWidth }}
       >
         <div
           className="h-full rounded"
@@ -67,25 +73,145 @@ function formatTs(iso: string): string {
   });
 }
 
+/** Normalise a self-out value that may be a 0..1 rate or a 0..100 percent. */
+function selfOutFraction(card: ModelCard): number | null {
+  const v = metricNumber(card.metrics, ['self_out_rate', 'self_out%']);
+  if (v == null) return null;
+  return v > 1 ? v / 100 : v;
+}
+
+/** Mode tag: forge/warn for a quick probe, cyan for the full gauntlet. */
+function ModeTag({ mode }: { mode: EvalMode }) {
+  const isFull = mode === 'full';
+  const color = isFull ? 'var(--cyan)' : 'var(--warn)';
+  return (
+    <span
+      className="micro"
+      title={
+        isFull
+          ? 'Full gauntlet: whole trained zoo + held-out (incl. novamax)'
+          : 'Quick probe: 3 easy opponents — not the full picture'
+      }
+      style={{
+        fontSize: 9,
+        letterSpacing: '.1em',
+        padding: '2px 6px',
+        borderRadius: 'var(--radius)',
+        border: `1px solid ${color}`,
+        color,
+        background: 'var(--bg-2)',
+        whiteSpace: 'nowrap',
+      }}
+    >
+      {isFull ? 'FULL GAUNTLET' : 'QUICK PROBE'}
+    </span>
+  );
+}
+
+/** One of the two unevaluated launch buttons (QUICK / FULL). */
+function EvalButton({
+  label,
+  hint,
+  running,
+  disabled,
+  onClick,
+}: {
+  label: string;
+  hint: string;
+  running: boolean;
+  disabled: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      title={hint}
+      className="micro flex-1"
+      style={{
+        fontSize: 10,
+        letterSpacing: '.06em',
+        padding: '4px 8px',
+        borderRadius: 'var(--radius)',
+        border: '1px solid var(--line-2)',
+        background: 'var(--bg-2)',
+        color: disabled ? 'var(--fg-2)' : 'var(--accent)',
+        cursor: disabled ? 'default' : 'pointer',
+      }}
+    >
+      {running ? `${label}…` : label}
+    </button>
+  );
+}
+
+function PerOpponentBreakdown({ card }: { card: ModelCard }) {
+  const per = card.metrics?.per_opponent;
+  if (!per || typeof per !== 'object') return null;
+  const rows = Object.entries(per)
+    .map(([name, m]) => ({ name, wr: typeof m?.wr === 'number' ? m.wr : null }))
+    .sort((a, b) => (b.wr ?? -1) - (a.wr ?? -1));
+  if (rows.length === 0) return null;
+  return (
+    <div className="mt-3">
+      <div className="micro text-fg-2" style={{ fontSize: 9 }}>
+        PER OPPONENT
+      </div>
+      <div className="mt-1.5 flex flex-col gap-1">
+        {rows.map((r) => (
+          <div key={r.name} className="flex items-center justify-between gap-2">
+            <span
+              className="num text-fg-1 truncate"
+              style={{ fontSize: 10 }}
+              title={r.name}
+            >
+              {r.name}
+            </span>
+            <WinRateBar frac={r.wr} trackWidth={56} />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function ModelCardView({ card: initial }: { card: ModelCard }) {
   const [card, setCard] = useState<ModelCard>(initial);
-  const [evaluating, setEvaluating] = useState(false);
+  // Track which mode is currently running ('quick' | 'full' | null).
+  const [running, setRunning] = useState<EvalMode | null>(null);
   const [err, setErr] = useState<string | null>(null);
-  const wr = winRateFraction(card);
-  const selfOut = metricNumber(card.metrics, ['self_out_rate', 'self_out%']);
-  const evaluated = card.metrics != null;
 
-  async function runEval() {
-    setEvaluating(true);
+  const wr = winRateFraction(card);
+  const selfOut = selfOutFraction(card);
+  const evaluated = card.metrics != null;
+  const m = card.metrics;
+  const mode = (m?.mode === 'quick' || m?.mode === 'full' ? m.mode : null) as
+    | EvalMode
+    | null;
+  const opponents = Array.isArray(m?.opponents) ? m!.opponents : null;
+  const nOpps =
+    opponents?.length ??
+    (m?.per_opponent ? Object.keys(m.per_opponent).length : null);
+  const mult = metricNumber(m, ['mult']);
+  const nEpisodes = metricNumber(m, ['n_episodes']);
+
+  async function runEval(mode: EvalMode) {
+    if (running) return;
+    setRunning(mode);
     setErr(null);
     try {
-      setCard(await api.evaluate(card.id));
+      setCard(await api.evaluate(card.id, mode));
     } catch (e) {
       setErr(e instanceof ApiError ? e.message : 'eval failed');
     } finally {
-      setEvaluating(false);
+      setRunning(null);
     }
   }
+
+  // Build the "vs N opponents @ M× , n=K" conditions line from what we have.
+  const conditions: string[] = [];
+  if (nOpps != null) conditions.push(`vs ${nOpps} opponents`);
+  if (mult != null) conditions.push(`@ ${mult}×`);
+  if (nEpisodes != null) conditions.push(`n=${nEpisodes}`);
 
   return (
     <Panel
@@ -106,43 +232,95 @@ function ModelCardView({ card: initial }: { card: ModelCard }) {
         />
         <Stat label="PARAMS" value={card.param_count.toLocaleString()} />
       </div>
-      <div className="mt-3 flex items-center justify-between">
-        <span className="micro text-fg-2" style={{ fontSize: 9 }}>
-          WIN RATE
-        </span>
-        {evaluated ? (
-          <WinRateBar frac={wr} />
-        ) : (
-          <button
-            onClick={runEval}
-            disabled={evaluating}
-            title="Runs a PyBullet eval on the backend (slow)"
-            className="micro"
-            style={{
-              fontSize: 10,
-              letterSpacing: '.06em',
-              padding: '3px 8px',
-              borderRadius: 'var(--radius)',
-              border: '1px solid var(--line-2)',
-              background: 'var(--bg-2)',
-              color: evaluating ? 'var(--fg-2)' : 'var(--accent)',
-              cursor: evaluating ? 'default' : 'pointer',
-            }}
-          >
-            {evaluating ? 'EVALUATING…' : 'NOT EVALUATED · RUN'}
-          </button>
-        )}
-      </div>
-      {evaluated && selfOut != null && (
-        <div className="mt-1.5 flex items-center justify-between">
-          <span className="micro text-fg-2" style={{ fontSize: 9 }}>
-            SELF-OUT
-          </span>
-          <span className="num" style={{ fontSize: 11, color: 'var(--loss)' }}>
-            {(selfOut > 1 ? selfOut : selfOut * 100).toFixed(0)}%
-          </span>
+
+      {evaluated ? (
+        <>
+          <div className="mt-3 flex items-center justify-between">
+            <span className="micro text-fg-2" style={{ fontSize: 9 }}>
+              WIN RATE
+            </span>
+            {mode && <ModeTag mode={mode} />}
+          </div>
+          <div className="mt-1.5 flex items-center justify-end">
+            <WinRateBar frac={wr} />
+          </div>
+
+          {conditions.length > 0 && (
+            <div
+              className="num mt-2 text-fg-2"
+              style={{ fontSize: 10 }}
+              title="Evaluation conditions"
+            >
+              {conditions.join(' ')}
+            </div>
+          )}
+
+          {selfOut != null && (
+            <div className="mt-1.5 flex items-center justify-between">
+              <span className="micro text-fg-2" style={{ fontSize: 9 }}>
+                SELF-OUT
+              </span>
+              <span
+                className="num"
+                style={{ fontSize: 11, color: 'var(--loss)' }}
+              >
+                {(selfOut * 100).toFixed(0)}%
+              </span>
+            </div>
+          )}
+
+          <PerOpponentBreakdown card={card} />
+
+          {mode === 'quick' && (
+            <div className="mt-3 flex justify-end">
+              <button
+                onClick={() => runEval('full')}
+                disabled={running != null}
+                title="Re-run against the full gauntlet (whole zoo + held-out, slow)"
+                className="micro"
+                style={{
+                  fontSize: 10,
+                  letterSpacing: '.06em',
+                  padding: '3px 8px',
+                  borderRadius: 'var(--radius)',
+                  border: '1px solid var(--cyan-dim)',
+                  background: 'var(--bg-2)',
+                  color: running ? 'var(--fg-2)' : 'var(--cyan)',
+                  cursor: running ? 'default' : 'pointer',
+                }}
+              >
+                {running === 'full' ? 'RUNNING FULL…' : 'RUN FULL →'}
+              </button>
+            </div>
+          )}
+        </>
+      ) : (
+        <div className="mt-3">
+          <div className="micro text-fg-2" style={{ fontSize: 9 }}>
+            NOT EVALUATED
+          </div>
+          <div className="mt-1.5 flex gap-2">
+            <EvalButton
+              label="QUICK"
+              hint="3 easy opponents (dodger/spinner/rammer), fast"
+              running={running === 'quick'}
+              disabled={running != null}
+              onClick={() => runEval('quick')}
+            />
+            <EvalButton
+              label="FULL"
+              hint="Full gauntlet incl. novamax + held-out, slow"
+              running={running === 'full'}
+              disabled={running != null}
+              onClick={() => runEval('full')}
+            />
+          </div>
+          <div className="num mt-1.5 text-fg-2" style={{ fontSize: 9 }}>
+            QUICK = 3 easy opponents, fast · FULL = whole zoo + held-out, slow
+          </div>
         </div>
       )}
+
       {err && (
         <div className="num mt-1.5" style={{ fontSize: 10, color: 'var(--loss)' }}>
           {err}

@@ -128,8 +128,32 @@ export interface Geometry {
   joints: GeomJoint[];
 }
 
+export type EvalMode = 'quick' | 'full';
+
+/** Per-opponent eval block carried in a model card's metrics.per_opponent. */
+export interface PerOpponentMetric {
+  wr: number;
+  wins: number;
+  losses: number;
+  timeouts: number;
+  self_out: number;
+  mean_ep_len: number;
+}
+
 export interface ModelMetrics {
-  [key: string]: number | string | null;
+  // Populated by POST /api/models/{id}/evaluate?mode=quick|full. Older cached
+  // cards may lack the newer fields — all are optional so the UI degrades.
+  mode?: EvalMode;
+  win_rate?: number;
+  self_outs?: number;
+  self_out_rate?: number;
+  n_episodes?: number;
+  mult?: number;
+  opponents?: string[];
+  per_opponent?: Record<string, PerOpponentMetric>;
+  evaluated_at?: string;
+  // Keep the loose index so legacy keys (winrate, wr, …) still read.
+  [key: string]: number | string | string[] | Record<string, PerOpponentMetric> | null | undefined;
 }
 
 export interface ModelCard {
