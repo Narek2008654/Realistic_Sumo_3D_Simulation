@@ -161,15 +161,19 @@ function ToFEditor({
         />
         <div className="col-span-2">
           <SliderField
-            label="Facing angle (yaw)"
-            unit="rad"
+            label="Facing angle"
+            unit="°"
             info="tof_angle"
-            value={s.angle_rad}
-            min={-Math.PI}
-            max={Math.PI}
-            step={0.0175}
-            format={(v) => `${v.toFixed(2)} (${deg(v)})`}
-            onChange={(v) => u.setSensor(i, (sn) => { sn.angle_rad = v; })}
+            value={(s.angle_rad * 180) / Math.PI}
+            min={-180}
+            max={180}
+            step={1}
+            format={(v) => `${v.toFixed(0)}°`}
+            onChange={(v) =>
+              u.setSensor(i, (sn) => {
+                sn.angle_rad = (v * Math.PI) / 180;
+              })
+            }
           />
         </div>
       </div>
