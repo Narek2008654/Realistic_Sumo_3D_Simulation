@@ -105,6 +105,9 @@ class _AnyioClient:
     def post(self, path: str, json: Any | None = None) -> _Resp:
         return self._call("POST", path, json)
 
+    def delete(self, path: str) -> _Resp:
+        return self._call("DELETE", path, None)
+
 
 def _make_client() -> Any:
     if importlib.util.find_spec("httpx") is not None:
@@ -172,6 +175,56 @@ def test_hardware_geometry_default_has_wheels() -> None:
     assert "right_wheel" in link_names, link_names
 
 
+def test_saved_robots_lifecycle() -> None:
+    """Save -> list -> get -> urdf -> delete -> 404, cleaning up after."""
+    spec = HardwareSpec.default().to_dict()
+    robot_id: str | None = None
+    try:
+        # POST save
+        resp = client.post(
+            "/api/robots", json={"name": "test-bot", "hardware_spec": spec}
+        )
+        assert resp.status_code in (200, 201), resp.text
+        record = resp.json()
+        robot_id = record["id"]
+        assert robot_id, record
+        assert record["obs_dim"] == 21, record
+        assert record["action_dim"] == 9, record
+
+        # GET list contains it
+        resp = client.get("/api/robots")
+        assert resp.status_code == 200, resp.text
+        ids = {r["id"] for r in resp.json()}
+        assert robot_id in ids, ids
+
+        # GET detail returns the spec with the right dims
+        resp = client.get(f"/api/robots/{robot_id}")
+        assert resp.status_code == 200, resp.text
+        full = resp.json()
+        assert full["obs_dim"] == 21, full
+        assert full["action_dim"] == 9, full
+        assert "hardware_spec" in full, full
+        assert full["hardware_spec"]["stack_k"] == spec["stack_k"], full
+
+        # GET urdf contains XML
+        resp = client.get(f"/api/robots/{robot_id}/urdf")
+        assert resp.status_code == 200, resp.text
+        assert "<robot" in resp.text, resp.text[:200]
+
+        # DELETE
+        resp = client.delete(f"/api/robots/{robot_id}")
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"deleted": True}, resp.text
+
+        # subsequent GET -> 404
+        resp = client.get(f"/api/robots/{robot_id}")
+        assert resp.status_code == 404, resp.text
+        robot_id = None  # already deleted; nothing to clean up
+    finally:
+        if robot_id is not None:
+            client.delete(f"/api/robots/{robot_id}")
+
+
 # ---------------------------------------------------------------------------
 # Plain-python harness (no pytest required).
 # ---------------------------------------------------------------------------
@@ -184,6 +237,7 @@ def _main() -> int:
          test_finetune_candidates_match_signature),
         ("hardware_geometry_default_has_wheels",
          test_hardware_geometry_default_has_wheels),
+        ("saved_robots_lifecycle", test_saved_robots_lifecycle),
     ]
     passed: list[str] = []
     failed: list[tuple[str, str]] = []

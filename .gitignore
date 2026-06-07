@@ -38,6 +38,7 @@ data/*.npz
 # LITE backend local caches/artifacts (regenerable; never committed).
 data/registry/
 data/jobs/
+data/robots/
 # Training logs.
 logs/
 *.log

@@ -21,8 +21,13 @@ REGISTRY_DIR: Path = DATA / "registry"
 # Job artifacts (trajectories, etc.) live under ``data/jobs/<job>/``.
 JOBS_DIR: Path = DATA / "jobs"
 
+# User-saved robot designs live under ``data/robots/<id>/`` (robot.json +
+# robot.urdf). Local-only, regenerable from the UI — never committed.
+ROBOTS_DIR: Path = DATA / "robots"
+
 
 def ensure_dirs() -> None:
     """Create the writable data sub-trees if they don't already exist."""
     REGISTRY_DIR.mkdir(parents=True, exist_ok=True)
     JOBS_DIR.mkdir(parents=True, exist_ok=True)
+    ROBOTS_DIR.mkdir(parents=True, exist_ok=True)
