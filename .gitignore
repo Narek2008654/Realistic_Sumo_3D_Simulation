@@ -47,3 +47,4 @@ logs/
 # Misc
 *.tmp
 timings_*.json
+.gstack/
