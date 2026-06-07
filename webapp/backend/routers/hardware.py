@@ -21,6 +21,7 @@ from typing import Any
 from fastapi import APIRouter, Body, HTTPException
 
 from webapp.backend import registry
+from webapp.backend.pybullet_lock import pybullet_lock
 from webapp.shared.geometry_export import spec_to_geometry
 from webapp.shared.hardware_spec import HardwareSpec
 from webapp.shared.urdf_gen import generate_urdf
@@ -60,19 +61,23 @@ def _urdf_loads_in_pybullet(urdf_str: str) -> tuple[bool, str | None]:
             fh.write(urdf_str)
             tmp_path = Path(fh.name)
 
-        client = p.connect(p.DIRECT)
-        if client < 0:
-            return False, "failed to connect to PyBullet DIRECT server"
-        p.loadURDF(str(tmp_path), physicsClientId=client)
-        return True, None
+        # Serialize with other in-process PyBullet work (model evaluation) so
+        # concurrent requests can't corrupt each other's client.
+        with pybullet_lock:
+            client = p.connect(p.DIRECT)
+            if client < 0:
+                return False, "failed to connect to PyBullet DIRECT server"
+            try:
+                p.loadURDF(str(tmp_path), physicsClientId=client)
+                return True, None
+            finally:
+                try:
+                    p.disconnect(client)
+                except Exception:  # pragma: no cover - best-effort cleanup
+                    pass
     except Exception as exc:  # noqa: BLE001 - report any load failure
         return False, str(exc)
     finally:
-        if client >= 0:
-            try:
-                p.disconnect(client)
-            except Exception:  # pragma: no cover - best-effort cleanup
-                pass
         if tmp_path is not None:
             tmp_path.unlink(missing_ok=True)
 

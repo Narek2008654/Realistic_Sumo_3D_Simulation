@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from webapp.backend import config
+from webapp.backend.pybullet_lock import pybullet_lock
 from webapp.shared.hardware_spec import HardwareSpec
 
 __all__ = [
@@ -252,19 +253,22 @@ def evaluate_model(model_id: str) -> dict[str, Any] | None:
 
     per_opp: dict[str, Any] = {}
     total_wins = total_n = total_self = 0
-    for opp in _EVAL_OPPONENTS:
-        r = run_eval(model, opp, _EVAL_MULT, _EVAL_N, _EVAL_SEED)
-        per_opp[opp] = {
-            "wr": r["wr"],
-            "wins": r["wins"],
-            "losses": r["losses"],
-            "timeouts": r["timeouts"],
-            "self_out": r["self_out"],
-            "mean_ep_len": r["mean_ep_len"],
-        }
-        total_wins += r["wins"]
-        total_n += r["n"]
-        total_self += r["self_out"]
+    # PyBullet is single-client per process: serialize the rollouts so two
+    # concurrent /evaluate calls queue instead of corrupting each other (500).
+    with pybullet_lock:
+        for opp in _EVAL_OPPONENTS:
+            r = run_eval(model, opp, _EVAL_MULT, _EVAL_N, _EVAL_SEED)
+            per_opp[opp] = {
+                "wr": r["wr"],
+                "wins": r["wins"],
+                "losses": r["losses"],
+                "timeouts": r["timeouts"],
+                "self_out": r["self_out"],
+                "mean_ep_len": r["mean_ep_len"],
+            }
+            total_wins += r["wins"]
+            total_n += r["n"]
+            total_self += r["self_out"]
 
     card["metrics"] = {
         "win_rate": total_wins / total_n if total_n else 0.0,
