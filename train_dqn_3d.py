@@ -187,6 +187,16 @@ else:
 TRAIN_EVERY = 4            # gradient step every N env steps
 TARGET_UPDATE_EVERY = 1    # Polyak soft update every step
 
+# E1f: periodic checkpoint/eval/trajectory cadence (env steps). Only used
+# when a job config is active (SUMO_RUN_CONFIG set); otherwise inert.
+EVAL_EVERY = 100_000
+
+# E1f job-config seam. ``_RUN_CFG`` is populated by main() iff SUMO_RUN_CONFIG
+# is set; when None the entire seam is a no-op and training is byte-identical
+# to today. ``_HW_SPEC`` flows into build_env so the job's robot is used.
+_RUN_CFG = None
+_HW_SPEC = None
+
 HERE = HERE_TOP
 OUTPUT_DIR = HERE / "checkpoints" / "dqn_intermediate"
 # alg/improvment: new checkpoint names so the committed (deployed)
@@ -651,6 +661,8 @@ def online_finetune(
         opponent_dr=False,
         sensor_hard_dr=False,
         opponent_weights=opponent_weights,
+        # E1f: a job spec overrides the robot; None keeps the default env.
+        **({"hardware_spec": _HW_SPEC} if _HW_SPEC is not None else {}),
     )
     buffer = NStepReplayBuffer(REPLAY_CAPACITY, GAMMA, N_STEP)
     opt = torch.optim.Adam(online.parameters(), lr=ONLINE_LR)
@@ -675,6 +687,9 @@ def online_finetune(
     recent_outcomes: deque[int] = deque(maxlen=200)
     per_opp_outcomes: dict[str, deque[int]] = {}
     best_score = -1.0
+    # E1f: periodic-hook state (only used when a job config is active).
+    last_eval = 0
+    eval_proc = None
     eps = EPS_START if eps_start is None else eps_start
 
     # Per-step linear eps decay rate (constant). The decay is applied
@@ -778,6 +793,12 @@ def online_finetune(
                     )
                     save_checkpoint_atomic(online.state_dict(), save_path)
                     marker = "  *BEST*"
+                # E1f: periodic checkpoint/eval/trajectory hook. Inert unless
+                # a job config is active (SUMO_RUN_CONFIG set).
+                if _RUN_CFG is not None:
+                    last_eval, eval_proc = checkpoint_hook.maybe_fire(
+                        online, step, _RUN_CFG, last_eval, eval_proc,
+                    )
                 opp_strs = []
                 for o_id in sorted(per_opp_outcomes):
                     outs = per_opp_outcomes[o_id]
@@ -810,6 +831,42 @@ def main() -> None:
     random.seed(SEED)
     np.random.seed(SEED)
     torch.manual_seed(SEED)
+
+    # E1f job-config seam. When SUMO_RUN_CONFIG is UNSET this is a strict
+    # no-op and every code path below is byte-identical to today. When set,
+    # load the job config and override the module constants the job controls.
+    _rc = os.environ.get("SUMO_RUN_CONFIG")
+    if _rc:
+        global _RUN_CFG, _HW_SPEC, EVAL_EVERY
+        global ONLINE_TIMESTEPS_PER_PHASE, FINETUNE_PHASES
+        global BEST_PATH, FINAL_PATH, RESUME_CHECKPOINT_PATH
+        from webapp.shared import run_config, checkpoint_hook as _ch
+        globals()["checkpoint_hook"] = _ch
+        cfg = run_config.load(_rc)
+        _RUN_CFG = cfg
+        _HW_SPEC = cfg.hardware_spec
+        EVAL_EVERY = cfg.eval_every
+        cfg.eval_every = cfg.eval_every  # (kept on cfg for the hook)
+        # Override the online curriculum to the job's total step budget. The
+        # job runs a single zoo phase at the existing top mult so total_steps
+        # is honoured exactly; opponent mix comes from opponent_weights.
+        top_mult = ONLINE_TIMESTEPS_PER_PHASE[-1][0]
+        ONLINE_TIMESTEPS_PER_PHASE = ((top_mult, int(cfg.total_steps), None),)
+        FINETUNE_PHASES = ((top_mult, int(cfg.total_steps), None),)
+        if cfg.output_best_path:
+            BEST_PATH = Path(cfg.output_best_path)
+        if cfg.output_final_path:
+            FINAL_PATH = Path(cfg.output_final_path)
+        if cfg.resume_path:
+            RESUME_CHECKPOINT_PATH = Path(cfg.resume_path)
+        print(
+            f"[E1f] job config active: {_rc}\n"
+            f"      total_steps={cfg.total_steps} eval_every={cfg.eval_every} "
+            f"job_dir={cfg.job_dir}\n"
+            f"      best={BEST_PATH} hardware_spec="
+            f"{cfg.hardware_spec.name if cfg.hardware_spec else None}",
+            flush=True,
+        )
 
     OUTPUT_DIR.mkdir(exist_ok=True)
 
@@ -1016,6 +1073,7 @@ def main() -> None:
     stats = online_finetune(
         online, target, initial_mult, initial_opp,
         demos=(obs_arr, act_arr, rew_arr, next_arr, done_arr),
+        opponent_weights=(_RUN_CFG.opponent_weights if _RUN_CFG else None),
     )
     print(
         f"\nDQN run complete: {stats['total_episodes']} episodes, "

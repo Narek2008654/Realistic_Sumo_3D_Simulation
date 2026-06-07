@@ -78,6 +78,15 @@ MULT_PHASES = ((0.7, 100_000), (1.0, 200_000), (1.5, 200_000),
 BEST_PATH = CHECKPOINTS / "ppo_stack_best.pt"
 FINAL_PATH = CHECKPOINTS / "ppo_stack_final.pt"
 
+# E1f: periodic checkpoint/eval/trajectory cadence (env steps). Only used
+# when a job config is active (SUMO_RUN_CONFIG set); otherwise inert.
+EVAL_EVERY = 100_000
+
+# E1f job-config seam. ``_RUN_CFG`` / ``_HW_SPEC`` are populated by train()
+# iff SUMO_RUN_CONFIG is set; when None the seam is a strict no-op.
+_RUN_CFG = None
+_HW_SPEC = None
+
 # Human-in-the-loop: every WATCH_EVERY steps, pop a GUI window playing the
 # CURRENT policy at the current curriculum mult (non-blocking — training
 # continues). Lets the user eyeball behaviour/gaps as it learns.
@@ -242,6 +251,40 @@ def train():
     np.random.seed(SEED)
     torch.manual_seed(SEED)
 
+    # E1f job-config seam. UNSET SUMO_RUN_CONFIG => strict no-op, training is
+    # byte-identical to today. When set, load the job config and override the
+    # constants the job controls.
+    _rc = os.environ.get("SUMO_RUN_CONFIG")
+    _opp_weights = None
+    if _rc:
+        global _RUN_CFG, _HW_SPEC, EVAL_EVERY, TOTAL_STEPS, MULT_PHASES
+        global BEST_PATH, FINAL_PATH, RESUME
+        from webapp.shared import run_config, checkpoint_hook as _ch
+        globals()["checkpoint_hook"] = _ch
+        cfg = run_config.load(_rc)
+        _RUN_CFG = cfg
+        _HW_SPEC = cfg.hardware_spec
+        EVAL_EVERY = cfg.eval_every
+        _opp_weights = cfg.opponent_weights
+        # Single mult phase at the existing top mult, sized to the job budget.
+        top_mult = MULT_PHASES[-1][0]
+        MULT_PHASES = ((top_mult, int(cfg.total_steps)),)
+        TOTAL_STEPS = int(cfg.total_steps)
+        if cfg.output_best_path:
+            BEST_PATH = pathlib.Path(cfg.output_best_path)
+        if cfg.output_final_path:
+            FINAL_PATH = pathlib.Path(cfg.output_final_path)
+        if cfg.resume_path:
+            RESUME = cfg.resume_path
+        print(
+            f"[E1f] job config active: {_rc}\n"
+            f"      total_steps={cfg.total_steps} eval_every={cfg.eval_every} "
+            f"job_dir={cfg.job_dir}\n"
+            f"      best={BEST_PATH} hardware_spec="
+            f"{cfg.hardware_spec.name if cfg.hardware_spec else None}",
+            flush=True,
+        )
+
     # alg/improvment: tracking reward instead of flank (mutually exclusive in
     # the env). The flank-trained champion span/circled erratically; tracking
     # rewards keeping the opponent in the front cone, which steadies pursuit.
@@ -255,6 +298,10 @@ def train():
         # robustness DR: diverse opponent power / speed / hardware
         opponent_dr=ROBUST, enemy_chassis_dr=ROBUST,
         mult_dr_range=ROBUST_MULT_RANGE if ROBUST else None,
+        # E1f: a job config overrides the opponent mix / robot; both default
+        # to None so the unset path is byte-identical.
+        **({"opponent_weights": _opp_weights} if _opp_weights else {}),
+        **({"hardware_spec": _HW_SPEC} if _HW_SPEC is not None else {}),
     )
 
     net = ActorCritic(NET_OBS_DIM, N_ACTIONS, hidden=NET_ARCH)
@@ -290,6 +337,9 @@ def train():
     t0 = time.time()
     last_log = 0
     last_watch = 0
+    # E1f periodic-hook state (only used when a job config is active).
+    last_eval = 0
+    eval_proc = None
     update_idx = 0
     last_entropy = 0.0
     last_kl = 0.0
@@ -408,6 +458,12 @@ def train():
                 best_score = score
                 save_checkpoint_atomic(net.state_dict(), BEST_PATH)
                 marker = "  *BEST*"
+            # E1f: periodic checkpoint/eval/trajectory hook. Inert unless a
+            # job config is active (SUMO_RUN_CONFIG set).
+            if _RUN_CFG is not None:
+                last_eval, eval_proc = checkpoint_hook.maybe_fire(
+                    net, step, _RUN_CFG, last_eval, eval_proc,
+                )
             fps = step / max(1e-6, time.time() - t0)
             phase_tag = " [warmup]" if update_idx <= CRITIC_WARMUP_UPDATES else ""
             print(f"step {step:7d}  ep={episodes:5d}  wr({len(recent)})={wr:.2%}  "
