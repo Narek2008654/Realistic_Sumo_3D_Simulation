@@ -26,8 +26,10 @@ import { api, ApiError } from '../api';
 import { Panel, Reveal, StatusPill } from '../components/ui';
 import { Info } from '../components/Info';
 import { HardwareForm } from '../components/HardwareForm';
+import { HardwarePresetPicker } from '../components/HardwarePresetPicker';
 import { RobotPreview } from '../components/RobotPreview';
 import { TrajectoryPlayer } from '../components/TrajectoryPlayer';
+import { HELP } from '../help';
 import type {
   BattleResult,
   CustomOpponentSummary,
@@ -35,12 +37,25 @@ import type {
   HardwareSpec,
   ModelCard,
   OpponentAction,
+  OpponentBehavior,
   OpponentCond,
   OpponentDsl,
   OpponentPredicate,
   OpponentRule,
   RobotSummary,
+  TrainOpponent,
 } from '../types';
+
+// Which behavior source Stage 2 is authoring: a built-in zoo controller or a
+// user-authored rule DSL.
+type BehaviorSource = 'zoo' | 'dsl';
+
+// Friendly display name + help topic for a zoo controller id. Falls back to the
+// raw id (and no ⓘ) for any future id we don't have copy for yet.
+function zooInfoTopic(id: string): string | null {
+  const topic = `zoo_${id}`;
+  return HELP[topic] ? topic : null;
+}
 
 const VALIDATE_DEBOUNCE_MS = 350;
 
@@ -185,6 +200,13 @@ export default function Opponents() {
   // Builder — two-stage: HARDWARE first, then LOGIC.
   const [stage, setStage] = useState<'hardware' | 'logic'>('hardware');
   const [name, setName] = useState('');
+
+  // Stage 2 · BEHAVIOR — either a built-in zoo controller or a custom rule DSL.
+  const [behaviorSource, setBehaviorSource] = useState<BehaviorSource>('zoo');
+  const [zooId, setZooId] = useState('');
+  const [zooList, setZooList] = useState<TrainOpponent[]>([]);
+
+  // Custom-rules (DSL) builder state.
   const [rules, setRules] = useState<RuleDraft[]>([
     newRule({ preds: ['front_hit'], action: 'forward' }),
     newRule({ preds: ['edge_left'], action: 'spin_right' }),
@@ -193,6 +215,9 @@ export default function Opponents() {
 
   // Hardware — the full spec the opponent is built on (used in sim).
   const [hwSpec, setHwSpec] = useState<HardwareSpec | null>(null);
+  // Whether the user has edited the hardware since it was last seeded (so a
+  // preset click can confirm before discarding edits).
+  const [hwDirty, setHwDirty] = useState(false);
   const [geom, setGeom] = useState<Geometry | null>(null);
   const [geomLoading, setGeomLoading] = useState(false);
   const [geomError, setGeomError] = useState<string | null>(null);
@@ -200,6 +225,12 @@ export default function Opponents() {
 
   // Optional "seed from a saved robot" picker.
   const [robots, setRobots] = useState<RobotSummary[]>([]);
+
+  // Stage-1 hardware validation (debounced) — surfaces the backend's mini-sumo
+  // class violations (and any URDF error) BEFORE the user reaches save, so an
+  // over-limit chassis reads e.g. "mass 800 g exceeds the mini-sumo limit…".
+  const [hwErrors, setHwErrors] = useState<string[]>([]);
+  const hwValidateRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Validation (debounced)
   const [validOk, setValidOk] = useState<boolean | null>(null);
@@ -222,19 +253,34 @@ export default function Opponents() {
 
   const dsl = useMemo(() => compileDsl(rules, def), [rules, def]);
 
+  // The behavior object Stage 2 currently describes (zoo selection or the
+  // compiled DSL). Null when a zoo source is chosen but no id is selected yet.
+  const behavior = useMemo<OpponentBehavior | null>(() => {
+    if (behaviorSource === 'zoo') {
+      return zooId ? { kind: 'zoo', zoo_id: zooId } : null;
+    }
+    return { kind: 'dsl', dsl };
+  }, [behaviorSource, zooId, dsl]);
+
   // ---- Loaders -------------------------------------------------------------
   const reloadRoster = useCallback(async () => {
     try {
       const list = await api.listOpponents();
       setRoster(list);
       setRosterError(null);
-      // Fetch rule counts lazily (list summaries omit the DSL).
+      // Fetch rule counts lazily for DSL opponents only (list summaries omit
+      // the DSL; zoo opponents have no rules so we leave them undefined).
       const counts: Record<string, number> = {};
       await Promise.all(
         list.map(async (o) => {
+          if (o.behavior?.kind === 'zoo') return;
           try {
             const full = await api.getOpponent(o.id);
-            counts[o.id] = full.behavior_dsl?.rules?.length ?? 0;
+            if (full.behavior?.kind === 'dsl') {
+              counts[o.id] = full.behavior.dsl.rules.length;
+            } else if (full.behavior_dsl) {
+              counts[o.id] = full.behavior_dsl.rules.length;
+            }
           } catch {
             /* leave undefined */
           }
@@ -250,11 +296,23 @@ export default function Opponents() {
     reloadRoster();
     api
       .hardwareDefault()
-      .then(setHwSpec)
+      .then((s) => {
+        setHwSpec(s);
+        setHwDirty(false);
+      })
       .catch(() => {});
     api
       .listRobots()
       .then(setRobots)
+      .catch(() => {});
+    api
+      .trainOpponents()
+      .then(({ opponents }) => {
+        setZooList(opponents);
+        // Default the zoo dropdown to the first id so a "built-in" save is
+        // ready without an extra click.
+        setZooId((cur) => cur || opponents[0]?.id || '');
+      })
       .catch(() => {});
     api
       .models()
@@ -288,12 +346,32 @@ export default function Opponents() {
     };
   }, [hwSpec]);
 
+  // ---- Debounced hardware validate (mini-sumo class + URDF) ----------------
+  // Reuses /api/hardware/validate (same endpoint the Hardware page uses); its
+  // `errors[]` carries the mini-sumo violations the backend would reject on save.
+  useEffect(() => {
+    if (!hwSpec) return;
+    if (hwValidateRef.current) clearTimeout(hwValidateRef.current);
+    hwValidateRef.current = setTimeout(async () => {
+      try {
+        const v = await api.validate(hwSpec);
+        setHwErrors(v.errors);
+      } catch {
+        // Non-fatal: leave any prior errors; the save path still gates.
+      }
+    }, VALIDATE_DEBOUNCE_MS);
+    return () => {
+      if (hwValidateRef.current) clearTimeout(hwValidateRef.current);
+    };
+  }, [hwSpec]);
+
   // Seed the hardware editor from a saved robot (optional convenience).
   async function loadFromRobot(id: string) {
     if (!id) return;
     try {
       const rec = await api.getRobot(id);
       setHwSpec(rec.hardware_spec);
+      setHwDirty(false);
     } catch (e) {
       setSaveMsg({
         kind: 'err',
@@ -302,8 +380,31 @@ export default function Opponents() {
     }
   }
 
+  // Seed the hardware editor from a preset chassis. Confirm first if the user
+  // has already edited the current spec (so a stray click can't discard work).
+  function seedFromPreset(spec: HardwareSpec) {
+    if (
+      hwDirty &&
+      !window.confirm(
+        'Replace the current hardware with this preset? Your edits will be lost.',
+      )
+    ) {
+      return;
+    }
+    setHwSpec(spec);
+    setHwDirty(false);
+  }
+
   // ---- Debounced validate --------------------------------------------------
+  // Only the DSL source needs a live backend round-trip; a zoo behavior is
+  // valid as soon as an id is selected (the dropdown only offers known ids).
   useEffect(() => {
+    if (behaviorSource !== 'dsl') {
+      if (validateRef.current) clearTimeout(validateRef.current);
+      setValidOk(zooId ? true : null);
+      setValidErrors([]);
+      return;
+    }
     if (validateRef.current) clearTimeout(validateRef.current);
     setValidOk(null);
     validateRef.current = setTimeout(async () => {
@@ -319,7 +420,7 @@ export default function Opponents() {
     return () => {
       if (validateRef.current) clearTimeout(validateRef.current);
     };
-  }, [dsl]);
+  }, [dsl, behaviorSource, zooId]);
 
   // ---- Rule mutations ------------------------------------------------------
   function patchRule(key: string, patch: Partial<RuleDraft>) {
@@ -364,6 +465,10 @@ export default function Opponents() {
       setSaveMsg({ kind: 'err', text: 'Give the opponent a name first.' });
       return;
     }
+    if (!behavior) {
+      setSaveMsg({ kind: 'err', text: 'Pick a built-in behavior first.' });
+      return;
+    }
     setSaving(true);
     setSaveMsg(null);
     setSavedNotes(null);
@@ -371,7 +476,7 @@ export default function Opponents() {
       const rec = await api.createOpponent({
         name: name.trim(),
         hardware_spec: hwSpec,
-        behavior_dsl: dsl,
+        behavior,
       });
       setSaveMsg({ kind: 'ok', text: `Saved “${rec.name}” (${rec.id}).` });
       setSavedNotes(rec.notes ?? null);
@@ -434,7 +539,8 @@ export default function Opponents() {
     }
   }
 
-  const saveDisabled = saving || validOk !== true || !name.trim() || !hwSpec;
+  const saveDisabled =
+    saving || validOk !== true || !name.trim() || !hwSpec || !behavior;
 
   return (
     <div className="grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)]">
@@ -464,9 +570,14 @@ export default function Opponents() {
           /* ---------------- STAGE 1 · HARDWARE ---------------- */
           <div className="grid grid-cols-1 gap-5 2xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
             <div className="flex flex-col gap-5">
-              {/* Seed-from-robot picker */}
+              {/* Seed-from-preset + seed-from-robot pickers */}
               <Reveal index={1}>
-                <Panel title="Seed Hardware" live bodyClassName="flex flex-col gap-2 p-4">
+                <Panel title="Seed Hardware" live bodyClassName="flex flex-col gap-3 p-4">
+                  {/* Preset chips — drop in a ready-made chassis. */}
+                  <HardwarePresetPicker onPick={(spec) => seedFromPreset(spec)} />
+
+                  <div className="h-px w-full" style={{ background: 'var(--line)' }} />
+
                   <span className="micro inline-flex items-center gap-1.5 text-fg-2" style={{ fontSize: 10 }}>
                     LOAD FROM A SAVED ROBOT · OPTIONAL
                     <Info topic="opp_hardware" />
@@ -488,9 +599,9 @@ export default function Opponents() {
                     ))}
                   </select>
                   <span className="num text-fg-2" style={{ fontSize: 10, lineHeight: 1.5 }}>
-                    Pick a robot to copy its full spec into the editor below, or
-                    edit the default chassis directly. The opponent fights on
-                    exactly this hardware.
+                    Drop in a preset, copy a saved robot's full spec, or edit the
+                    default chassis directly. The opponent fights on exactly this
+                    hardware.
                   </span>
                 </Panel>
               </Reveal>
@@ -499,7 +610,11 @@ export default function Opponents() {
                 <HardwareForm
                   spec={hwSpec}
                   setSpec={(updater) =>
-                    setHwSpec((prev) => (prev ? updater(prev) : prev))
+                    setHwSpec((prev) => {
+                      if (!prev) return prev;
+                      setHwDirty(true);
+                      return updater(prev);
+                    })
                   }
                   startIndex={2}
                 />
@@ -512,14 +627,37 @@ export default function Opponents() {
               )}
 
               <Reveal index={8}>
-                <button
-                  className="btn btn-primary"
-                  onClick={() => setStage('logic')}
-                  disabled={!hwSpec}
-                  style={{ height: 40, fontSize: 14 }}
-                >
-                  NEXT: BEHAVIOR →
-                </button>
+                <div className="flex flex-col gap-2">
+                  {/* Mini-sumo / URDF validation — surfaced before BEHAVIOR so an
+                      over-limit chassis is caught here, not only at save. */}
+                  {hwErrors.length > 0 && (
+                    <div
+                      className="flex flex-col gap-1 rounded border px-3 py-2"
+                      style={{
+                        borderColor: 'var(--loss)',
+                        background: 'rgba(255,84,112,.08)',
+                      }}
+                    >
+                      <span className="micro inline-flex items-center gap-1.5" style={{ fontSize: 10, color: 'var(--loss)' }}>
+                        NOT MINI-SUMO LEGAL
+                        <Info topic="mini_sumo" />
+                      </span>
+                      {hwErrors.map((e, i) => (
+                        <span key={i} className="num text-fg-1" style={{ fontSize: 10 }}>
+                          • {e}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  <button
+                    className="btn btn-primary"
+                    onClick={() => setStage('logic')}
+                    disabled={!hwSpec || hwErrors.length > 0}
+                    style={{ height: 40, fontSize: 14 }}
+                  >
+                    NEXT: BEHAVIOR →
+                  </button>
+                </div>
               </Reveal>
             </div>
 
@@ -534,9 +672,9 @@ export default function Opponents() {
             </Reveal>
           </div>
         ) : (
-          /* ---------------- STAGE 2 · LOGIC ---------------- */
+          /* ---------------- STAGE 2 · BEHAVIOR ---------------- */
           <Reveal index={1}>
-            <Panel title="Behavior Logic · rule builder" live ticks bodyClassName="flex flex-col gap-5 p-5">
+            <Panel title="Behavior" live ticks bodyClassName="flex flex-col gap-5 p-5">
               {/* Back */}
               <button
                 className="btn btn-ghost self-start"
@@ -554,52 +692,104 @@ export default function Opponents() {
                 <input
                   className="ctl num"
                   value={name}
-                  placeholder="e.g. Hunter-Mk1"
+                  placeholder="e.g. Heavy Dodger"
                   onChange={(e) => setName(e.target.value)}
                   style={{ fontSize: 13 }}
                 />
               </label>
 
-              {/* Rules */}
-              <div className="flex flex-col gap-3">
-                <div className="flex items-center justify-between">
-                  <span className="micro inline-flex items-center gap-1.5 text-fg-2" style={{ fontSize: 10 }}>
-                    BEHAVIOR RULES · CHECKED TOP→BOTTOM
-                    <Info topic="opp_rules" />
-                  </span>
-                  <button className="btn btn-secondary" onClick={addRule} style={{ height: 28, fontSize: 11 }}>
-                    + RULE
-                  </button>
-                </div>
-
-                {rules.length === 0 && (
-                  <span className="num" style={{ fontSize: 11, color: 'var(--warn)' }}>
-                    No rules yet — add at least one (the validator requires it).
-                  </span>
-                )}
-
-                {rules.map((r, i) => (
-                  <RuleEditor
-                    key={r.key}
-                    rule={r}
-                    index={i}
-                    count={rules.length}
-                    onPatch={(patch) => patchRule(r.key, patch)}
-                    onTogglePred={(p) => togglePred(r.key, p)}
-                    onRemove={() => removeRule(r.key)}
-                    onMove={(dir) => moveRule(r.key, dir)}
-                  />
-                ))}
+              {/* Behavior source toggle */}
+              <div className="flex flex-col gap-2">
+                <span className="micro inline-flex items-center gap-1.5 text-fg-2" style={{ fontSize: 10 }}>
+                  BEHAVIOR SOURCE
+                  <Info topic="opp_behavior_source" />
+                </span>
+                <Seg
+                  value={behaviorSource}
+                  onChange={setBehaviorSource}
+                  options={[
+                    { value: 'zoo', label: 'Built-in' },
+                    { value: 'dsl', label: 'Custom Rules' },
+                  ]}
+                />
               </div>
 
-              {/* Default */}
-              <label className="flex flex-col gap-1">
-                <span className="micro inline-flex items-center gap-1.5 text-fg-2" style={{ fontSize: 10 }}>
-                  DEFAULT ACTION · WHEN NO RULE MATCHES
-                  <Info topic="opp_default" />
-                </span>
-                <ActionSelect value={def} onChange={setDef} />
-              </label>
+              {behaviorSource === 'zoo' ? (
+                /* ---- Built-in zoo controller ---- */
+                <div className="flex flex-col gap-2">
+                  <span className="micro inline-flex items-center gap-1.5 text-fg-2" style={{ fontSize: 10 }}>
+                    BUILT-IN CONTROLLER
+                    <Info topic="opp_zoo" />
+                  </span>
+                  <div className="flex items-center gap-1.5">
+                    <select
+                      className="ctl num"
+                      value={zooId}
+                      onChange={(e) => setZooId(e.target.value)}
+                      style={{ fontSize: 12, flex: 1 }}
+                    >
+                      {zooList.length === 0 && <option value="">— loading… —</option>}
+                      {zooList.map((o) => (
+                        <option key={o.id} value={o.id}>
+                          {o.id}
+                          {o.held_out ? ' · eval-only' : ''}
+                        </option>
+                      ))}
+                    </select>
+                    {/* ⓘ describes whichever controller is selected. */}
+                    {zooInfoTopic(zooId) && <Info topic={zooInfoTopic(zooId)!} />}
+                  </div>
+                  <span className="num text-fg-2" style={{ fontSize: 10, lineHeight: 1.5 }}>
+                    One of our scripted zoo bots, dropped onto the hardware you
+                    built. Pair e.g. dodger with a heavy chassis for a "Heavy
+                    Dodger".
+                  </span>
+                </div>
+              ) : (
+                /* ---- Custom rule DSL ---- */
+                <>
+                  {/* Rules */}
+                  <div className="flex flex-col gap-3">
+                    <div className="flex items-center justify-between">
+                      <span className="micro inline-flex items-center gap-1.5 text-fg-2" style={{ fontSize: 10 }}>
+                        BEHAVIOR RULES · CHECKED TOP→BOTTOM
+                        <Info topic="opp_rules" />
+                      </span>
+                      <button className="btn btn-secondary" onClick={addRule} style={{ height: 28, fontSize: 11 }}>
+                        + RULE
+                      </button>
+                    </div>
+
+                    {rules.length === 0 && (
+                      <span className="num" style={{ fontSize: 11, color: 'var(--warn)' }}>
+                        No rules yet — add at least one (the validator requires it).
+                      </span>
+                    )}
+
+                    {rules.map((r, i) => (
+                      <RuleEditor
+                        key={r.key}
+                        rule={r}
+                        index={i}
+                        count={rules.length}
+                        onPatch={(patch) => patchRule(r.key, patch)}
+                        onTogglePred={(p) => togglePred(r.key, p)}
+                        onRemove={() => removeRule(r.key)}
+                        onMove={(dir) => moveRule(r.key, dir)}
+                      />
+                    ))}
+                  </div>
+
+                  {/* Default */}
+                  <label className="flex flex-col gap-1">
+                    <span className="micro inline-flex items-center gap-1.5 text-fg-2" style={{ fontSize: 10 }}>
+                      DEFAULT ACTION · WHEN NO RULE MATCHES
+                      <Info topic="opp_default" />
+                    </span>
+                    <ActionSelect value={def} onChange={setDef} />
+                  </label>
+                </>
+              )}
 
               {/* Live validation */}
               <ValidateBanner ok={validOk} errors={validErrors} />
@@ -747,6 +937,45 @@ const ACTION_INFO: Record<OpponentAction, string> = {
   arc_right: 'act_arc_right',
   stop: 'act_stop',
 };
+
+// Segmented toggle (mirrors Train/Arena's Seg primitive).
+function Seg<T extends string>({
+  options,
+  value,
+  onChange,
+}: {
+  options: { value: T; label: string }[];
+  value: T;
+  onChange: (v: T) => void;
+}) {
+  return (
+    <div className="flex overflow-hidden rounded border" style={{ borderColor: 'var(--line)' }}>
+      {options.map((o) => {
+        const active = o.value === value;
+        return (
+          <button
+            key={o.value}
+            type="button"
+            onClick={() => onChange(o.value)}
+            className="font-display uppercase"
+            style={{
+              flex: 1,
+              fontSize: 12,
+              letterSpacing: '.06em',
+              padding: '7px 10px',
+              border: 'none',
+              cursor: 'pointer',
+              color: active ? 'var(--bg-0)' : 'var(--fg-1)',
+              background: active ? 'var(--accent)' : 'var(--bg-2)',
+            }}
+          >
+            {o.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
 
 function ActionSelect({
   value,
@@ -1066,8 +1295,25 @@ function OpponentCardRow({
         <span className="font-display uppercase" style={{ fontSize: 14, color: 'var(--cyan)', letterSpacing: '.03em' }}>
           {opp.name}
         </span>
-        <span className="num text-fg-2" style={{ fontSize: 10 }}>
-          {ruleCountLabel(ruleCount)} · {fmtDate(opp.created_at)}
+        {/* Behavior summary chip + (for DSL) rule count. */}
+        <span className="num inline-flex flex-wrap items-center gap-1.5" style={{ fontSize: 10 }}>
+          {opp.behavior_summary && (
+            <span
+              style={{
+                color: opp.behavior?.kind === 'zoo' ? 'var(--accent)' : 'var(--cyan)',
+                border: '1px solid var(--line-2)',
+                borderRadius: 'var(--radius)',
+                padding: '1px 6px',
+                letterSpacing: '.02em',
+              }}
+            >
+              {opp.behavior_summary}
+            </span>
+          )}
+          {opp.behavior?.kind !== 'zoo' && (
+            <span className="text-fg-2">{ruleCountLabel(ruleCount)}</span>
+          )}
+          <span className="text-fg-2">· {fmtDate(opp.created_at)}</span>
         </span>
         <span className="num text-fg-2" style={{ fontSize: 9 }}>
           {opp.id}

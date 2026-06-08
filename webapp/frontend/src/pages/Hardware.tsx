@@ -11,6 +11,7 @@ import { Readout } from '../components/fields';
 import { Interview, type SpecUpdaters } from '../components/Interview';
 import { RobotPreview } from '../components/RobotPreview';
 import { HardwareForm } from '../components/HardwareForm';
+import { HardwarePresetPicker } from '../components/HardwarePresetPicker';
 import { Info } from '../components/Info';
 import { Panel, Reveal, StatusDot } from '../components/ui';
 import { useBuilderStore } from '../store/builder';
@@ -199,6 +200,27 @@ export default function Hardware() {
     setLine,
     setLineCount,
   };
+
+  // Whether the user has edited the spec since it was last seeded (so a preset
+  // click can confirm before discarding work). Set on any form edit, cleared on
+  // (re)seed.
+  const [dirty, setDirty] = useState(false);
+
+  // Seed the calibrate form from a preset chassis. Confirm first if the user has
+  // already edited the current spec.
+  function seedFromPreset(preset: HardwareSpec) {
+    if (
+      dirty &&
+      !window.confirm(
+        'Replace the current hardware with this preset? Your edits will be lost.',
+      )
+    ) {
+      return;
+    }
+    setSpec(preset);
+    setSeedName(preset.name);
+    setDirty(false);
+  }
 
   // Save flow ----------------------------------------------------------------
   const [saving, setSaving] = useState(false);
@@ -393,12 +415,22 @@ export default function Hardware() {
       <div className="grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(0,1.05fr)]">
         {/* Left column: editable spec — shared full hardware editor */}
         <div className="flex flex-col gap-5">
+          {/* Drop-in preset chassis (shared with the Opponents builder). */}
+          <Reveal index={1}>
+            <Panel title="Seed From Preset" live bodyClassName="p-4">
+              <HardwarePresetPicker onPick={(s) => seedFromPreset(s)} />
+            </Panel>
+          </Reveal>
           <HardwareForm
             spec={spec}
             setSpec={(updater) =>
-              setSpec((prev) => (prev ? updater(prev) : prev))
+              setSpec((prev) => {
+                if (!prev) return prev;
+                setDirty(true);
+                return updater(prev);
+              })
             }
-            startIndex={1}
+            startIndex={2}
           />
         </div>
 

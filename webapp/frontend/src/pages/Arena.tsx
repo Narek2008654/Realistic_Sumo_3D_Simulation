@@ -20,6 +20,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api, ApiError } from '../api';
 import { Panel, Reveal, StatusPill } from '../components/ui';
 import { SliderField } from '../components/fields';
+import { MINI_SUMO_MAX_MASS_KG } from '../components/HardwareForm';
 import { TrajectoryPlayer } from '../components/TrajectoryPlayer';
 import type {
   BattleBody,
@@ -136,7 +137,7 @@ function HardwareTweak({
           unit="kg"
           value={c.mass_kg}
           min={0.1}
-          max={1.5}
+          max={MINI_SUMO_MAX_MASS_KG}
           step={0.01}
           format={(v) => v.toFixed(2)}
           onChange={(v) => setChassis('mass_kg', v)}

@@ -228,7 +228,65 @@ export const HELP: Record<string, HelpTopic> = {
 
   opp_hardware: {
     title: 'Opponent hardware',
-    body: 'Recorded for the design, but in v1 a custom opponent fights on the standard enemy chassis — only its behavior rules drive what it does. The saved spec is kept for later.',
+    body: 'The chassis this opponent fights on. The enemy body, wheels, wedge, mass and motor caps all come from this saved spec at battle time — so pairing a behavior with a heavy or fast preset changes how it actually fights.',
+  },
+
+  // --- Opponent: behavior source + presets ---------------------------------
+  opp_behavior_source: {
+    title: 'Behavior source',
+    body: 'Where this opponent\'s brain comes from. BUILT-IN picks one of our zoo controllers (dodger, rammer, novamax, …). CUSTOM RULES lets you author your own IF→THEN behavior. Either one is crossed with the hardware you built in step 1.',
+  },
+  opp_zoo: {
+    title: 'Built-in behavior',
+    body: 'One of our hand-written zoo controllers — the same scripted bots the agent trains and is evaluated against. Drop one onto any chassis (e.g. dodger on a heavy body = a "Heavy Dodger").',
+  },
+  hardware_preset: {
+    title: 'Hardware preset',
+    body: 'A ready-made chassis you can drop in instead of editing every field. NovaMax is faithful to our reference kit-bot; the others are archetypes (wide pusher, light speedster, heavy rammer, balanced disc). Picking one replaces the current spec; you can still tweak it after.',
+  },
+
+  // --- Mini-sumo class limits ----------------------------------------------
+  mini_sumo: {
+    title: 'Mini-sumo class limits',
+    body: 'Regulation mini-sumo robots must weigh at most 500 g and fit inside a 10 x 10 cm box. The chassis MASS, LENGTH and WIDTH below are capped to those limits — an over-limit spec is rejected on save.',
+  },
+
+  // --- Zoo behaviors (one per controller) ----------------------------------
+  zoo_novamax: {
+    title: 'novamax',
+    body: 'Our reference bot: tracks the enemy and charges with a steady, well-rounded push. A solid all-round benchmark opponent.',
+  },
+  zoo_rammer: {
+    title: 'rammer',
+    body: 'A straight-line charger — locks onto the enemy and drives hard, betting on momentum to push you out.',
+  },
+  zoo_dodger: {
+    title: 'dodger',
+    body: 'Evasive: circles and side-steps to avoid head-on hits, trying to make you over-commit and self-out near the edge.',
+  },
+  zoo_spinner: {
+    title: 'spinner',
+    body: 'Spins in place to search, then darts at the enemy when a sensor catches it — unpredictable angles of attack.',
+  },
+  zoo_wedger: {
+    title: 'wedger',
+    body: 'A wedge-pusher: lines up to get its plow under you, then shovels you toward the edge.',
+  },
+  zoo_charger: {
+    title: 'charger',
+    body: 'Aggressive rushing behavior — commits early and hard toward the last seen enemy position.',
+  },
+  zoo_tracker: {
+    title: 'tracker',
+    body: 'Patient pursuer: keeps the enemy centred in its sensors and follows, looking for a clean pushing angle.',
+  },
+  zoo_feinter: {
+    title: 'feinter',
+    body: 'Feints and bait moves to draw you into a mistake. Held out of the standard training mix — an eval-only test of generalization.',
+  },
+  zoo_orbiter: {
+    title: 'orbiter',
+    body: 'Orbits around the enemy looking for a flank. Held out of the standard training mix — an eval-only test of generalization.',
   },
 
   // --- Interview step intros (one sentence each) ---------------------------

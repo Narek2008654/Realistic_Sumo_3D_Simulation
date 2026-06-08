@@ -14,6 +14,13 @@ import { Info } from './Info';
 import { SliderField, clamp, positionBounds } from './fields';
 import type { DistanceSensor, HardwareSpec } from '../types';
 
+// Mini-sumo class limits (mirror of webapp/shared/hardware_spec.py:
+// MINI_SUMO_MAX_MASS_KG / MINI_SUMO_MAX_FOOTPRINT_M). The chassis MASS / LENGTH /
+// WIDTH sliders are capped to these so the editor can't author an over-limit
+// chassis; the backend still rejects a manually-typed over-limit value on save.
+export const MINI_SUMO_MAX_MASS_KG = 0.5;
+export const MINI_SUMO_MAX_FOOTPRINT_M = 0.1;
+
 function deg(rad: number): string {
   return `${((rad * 180) / Math.PI).toFixed(0)}°`;
 }
@@ -115,7 +122,17 @@ export function HardwareForm({
   return (
     <>
       <Reveal index={startIndex}>
-        <Panel title="Chassis" live ticks>
+        <Panel
+          title="Chassis"
+          live
+          ticks
+          right={
+            <span className="micro inline-flex items-center gap-1.5 text-fg-2" style={{ fontSize: 9 }}>
+              MINI-SUMO: ≤500 g, ≤10×10 cm
+              <Info topic="mini_sumo" />
+            </span>
+          }
+        >
           <div className="grid grid-cols-2 gap-x-4 gap-y-3">
             <SliderField
               label="Mass"
@@ -123,7 +140,7 @@ export function HardwareForm({
               info="mass"
               value={c.mass_kg}
               min={0.1}
-              max={1.5}
+              max={MINI_SUMO_MAX_MASS_KG}
               step={0.01}
               format={(v) => v.toFixed(2)}
               onChange={(v) => setChassis('mass_kg', v)}
@@ -134,7 +151,7 @@ export function HardwareForm({
               info="body_length"
               value={c.length_m}
               min={0.04}
-              max={0.15}
+              max={MINI_SUMO_MAX_FOOTPRINT_M}
               step={0.001}
               onChange={(v) => setChassis('length_m', v)}
             />
@@ -144,7 +161,7 @@ export function HardwareForm({
               info="width"
               value={c.width_m}
               min={0.04}
-              max={0.15}
+              max={MINI_SUMO_MAX_FOOTPRINT_M}
               step={0.001}
               onChange={(v) => setChassis('width_m', v)}
             />

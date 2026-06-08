@@ -87,6 +87,16 @@ export interface RobotRecord extends RobotSummary {
   hardware_spec: HardwareSpec;
 }
 
+/** A named, ready-to-use chassis from GET /api/hardware/presets. Its
+ *  `hardware_spec` seeds the builder (it keeps the default obs/action contract,
+ *  so it stays finetune-compatible). */
+export interface HardwarePreset {
+  id: string;
+  name: string;
+  description: string;
+  hardware_spec: HardwareSpec;
+}
+
 // ---- API response shapes ---------------------------------------------------
 
 export interface ValidateResult {
@@ -357,17 +367,34 @@ export interface OpponentDsl {
   default: OpponentAction;
 }
 
-/** Summary row from GET /api/opponents. `n_rules` is derived client-side. */
+/**
+ * An opponent's BEHAVIOR — either a built-in zoo controller (by id) or a
+ * user-authored rule DSL. This is the `behavior` object the backend stores and
+ * battles/training resolve through. (A legacy `behavior_dsl` on a record is
+ * normalised server-side to `{kind:'dsl', dsl}`.)
+ */
+export type OpponentBehavior =
+  | { kind: 'zoo'; zoo_id: string }
+  | { kind: 'dsl'; dsl: OpponentDsl };
+
+/** Summary row from GET /api/opponents. `behavior_summary` is e.g.
+ *  `"zoo:dodger"` or `"custom rules"`; both `behavior*` are nullable for legacy
+ *  records the backend couldn't normalise. */
 export interface CustomOpponentSummary {
   id: string;
   name: string;
   created_at: string;
+  behavior?: OpponentBehavior | null;
+  behavior_summary?: string | null;
 }
 
-/** Full record from GET /api/opponents/{id} (and POST /api/opponents). */
+/** Full record from GET /api/opponents/{id} (and POST /api/opponents). The
+ *  `behavior` is authoritative; `behavior_dsl` is a legacy mirror present only
+ *  for DSL behaviors. */
 export interface CustomOpponent extends CustomOpponentSummary {
   hardware_spec: HardwareSpec;
-  behavior_dsl: OpponentDsl;
+  behavior: OpponentBehavior;
+  behavior_dsl?: OpponentDsl;
   notes?: string;
 }
 
@@ -375,7 +402,7 @@ export interface CustomOpponent extends CustomOpponentSummary {
 export interface CreateOpponentBody {
   name: string;
   hardware_spec: HardwareSpec;
-  behavior_dsl: OpponentDsl;
+  behavior: OpponentBehavior;
 }
 
 /** Result of POST /api/opponents/validate. */

@@ -9,8 +9,10 @@ import type {
   CustomOpponentSummary,
   EvalMode,
   Geometry,
+  HardwarePreset,
   HardwareSpec,
   ModelCard,
+  OpponentBehavior,
   OpponentDsl,
   OpponentValidateResult,
   RecommendResult,
@@ -63,6 +65,11 @@ export const api = {
   health: () => request<{ status: string }>('/api/health'),
 
   hardwareDefault: () => request<HardwareSpec>('/api/hardware/default'),
+
+  // The hardware-preset library (novamax + archetypes). Each preset's spec can
+  // seed the builder, then be crossed with any behavior to save a variant.
+  getHardwarePresets: () =>
+    request<HardwarePreset[]>('/api/hardware/presets'),
 
   validate: (spec: HardwareSpec) =>
     request<ValidateResult>('/api/hardware/validate', {
@@ -194,10 +201,17 @@ export const api = {
       method: 'DELETE',
     }),
 
-  // Validate a behavior DSL without saving. Returns { ok, errors }.
+  // Validate a behavior (zoo or dsl) without saving. Returns { ok, errors }.
+  validateOpponentBehavior: (behavior: OpponentBehavior) =>
+    request<OpponentValidateResult>('/api/opponents/validate', {
+      method: 'POST',
+      body: JSON.stringify({ behavior }),
+    }),
+
+  // Convenience: validate just a behavior DSL (wraps it as a dsl behavior).
   validateOpponentDsl: (dsl: OpponentDsl) =>
     request<OpponentValidateResult>('/api/opponents/validate', {
       method: 'POST',
-      body: JSON.stringify({ behavior_dsl: dsl }),
+      body: JSON.stringify({ behavior: { kind: 'dsl', dsl } }),
     }),
 };
