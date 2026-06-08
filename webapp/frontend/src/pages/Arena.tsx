@@ -317,7 +317,13 @@ export default function Arena() {
     };
     if (bKind === 'opponent') body.b_opponent_id = bOpponentId;
     else body.b_model_id = bModelId;
-    if (tweakA && aSpec) body.a_spec = aSpec;
+    // Send side-A's spec when hardware was overridden OR the ring size differs
+    // from the default (the env reads the dohyo radius from side A's spec).
+    const ringChanged =
+      !!aSpec &&
+      !!defaultSpec &&
+      Math.abs(aSpec.dohyo.radius_m - defaultSpec.dohyo.radius_m) > 1e-6;
+    if ((tweakA || ringChanged) && aSpec) body.a_spec = aSpec;
 
     try {
       const res = await api.runBattle(body);
@@ -442,6 +448,20 @@ export default function Arena() {
               max={5}
               step={0.1}
               format={(v) => `${v.toFixed(1)}×`}
+            />
+            <SliderField
+              label="RING SIZE · DOHYO RADIUS"
+              unit="m"
+              value={aSpec?.dohyo.radius_m ?? 0.35}
+              onChange={(v) =>
+                setASpec((prev) =>
+                  prev ? { ...prev, dohyo: { ...prev.dohyo, radius_m: v } } : prev,
+                )
+              }
+              min={0.2}
+              max={0.6}
+              step={0.005}
+              format={(v) => `${v.toFixed(3)} m`}
             />
             <label className="flex flex-col gap-1">
               <span className="micro text-fg-2" style={{ fontSize: 10 }}>
