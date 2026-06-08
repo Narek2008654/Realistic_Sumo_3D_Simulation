@@ -41,13 +41,16 @@ _JSON_NAME = "opponent.json"
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 _VALID_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
-# The custom opponent fights on the standard enemy chassis (its DSL drives the
-# behaviour); the saved hardware_spec is recorded for the design/UI but the
-# enemy body is NOT re-generated from it in v1. Stated explicitly, never faked.
+# The custom opponent fights on ITS OWN hardware: at battle time the enemy
+# body is generated from this saved hardware_spec (chassis/wheels/wedge/mass)
+# and its motor caps come from spec.drivetrain, while the behavior_dsl drives
+# the controller. (The opponent's sensor/perception model still uses the
+# standard 5-key IR + line-sensor suite the DSL predicates map to.)
 _STANDARD_CHASSIS_NOTE = (
-    "Custom opponent fights on the standard enemy chassis; its saved "
-    "hardware_spec is recorded but the enemy body is not regenerated from it "
-    "in v1. The behavior_dsl fully drives this opponent's actions."
+    "Custom opponent fights on its own hardware: the enemy chassis, wheels, "
+    "wedge, mass and motor caps come from its saved hardware_spec at battle "
+    "time. The behavior_dsl drives this opponent's controller; its perception "
+    "uses the standard IR + line-sensor suite."
 )
 
 

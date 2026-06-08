@@ -20,11 +20,12 @@ physics / obs logic:
     greedy rollout against ``force_opponent_id`` and the eval_and_record
     trajectory recorder.
 
-Per-robot hardware (best-effort): an optional ``a_spec`` HardwareSpec is
-threaded into the AGENT side via ``build_env(hardware_spec=...)``. Wiring a
-*different* chassis for the B side is not supported in v1; a ``b_spec`` is
-acknowledged in the response ``notes`` rather than silently ignored. See
-``run_battle`` for the exact limitation.
+Per-robot hardware: an optional ``a_spec`` HardwareSpec is threaded into the
+AGENT side via ``build_env(hardware_spec=...)``. A CUSTOM (saved) opponent now
+fights on ITS OWN chassis/motors — its saved HardwareSpec is threaded into the
+env as ``enemy_hardware_spec`` so the enemy body is generated from it and its
+drive caps come from spec.drivetrain. A standalone ``b_spec`` (B-side override
+for model-vs-model) is still acknowledged in ``notes`` rather than applied.
 
 Windows DLL-order convention: import ``torch`` before ``numpy``.
 """
@@ -87,6 +88,7 @@ def _battle_vs_opponent(
     net_a, opponent_id: str, rounds: int, mult: float, seed: int,
     hw_spec: HardwareSpec | None,
     extra_opponents: dict | None = None,
+    enemy_hw_spec: HardwareSpec | None = None,
 ) -> tuple[dict[str, int], dict[str, Any]]:
     """Run ``rounds`` greedy rollouts of model A vs a zoo or CUSTOM opponent.
 
@@ -98,6 +100,10 @@ def _battle_vs_opponent(
     A built-in zoo id must exist in ``OPPONENT_REGISTRY``; a custom id must be
     supplied via ``extra_opponents`` (id -> controller factory), which is
     merged into the env's sampling pool and pinned via ``force_opponent_id``.
+
+    ``enemy_hw_spec`` (custom opponents only) makes the enemy fight on its OWN
+    chassis/motors: it is threaded into the env so the body is generated from
+    that HardwareSpec and the enemy's drive caps come from spec.drivetrain.
     """
     from train_dqn_3d import build_env
     from webapp.shared.eval_and_record import _record_trajectory
@@ -117,6 +123,8 @@ def _battle_vs_opponent(
             narek_reward=False,
             **({"extra_opponents": extra_opponents} if extra_opponents else {}),
             **({"hardware_spec": hw_spec} if hw_spec is not None else {}),
+            **({"enemy_hardware_spec": enemy_hw_spec}
+               if enemy_hw_spec is not None else {}),
         )
         try:
             traj = _record_trajectory(env, net_a)
@@ -297,13 +305,17 @@ def _full_stats(rounds: int, raw: dict[str, int]) -> dict[str, int]:
 
 def _resolve_custom_opponent(
     opponent_id: str, notes: list[str]
-) -> dict | None:
-    """If ``opponent_id`` names a saved custom opponent, return an
-    ``extra_opponents`` mapping ``{id: DslOpponent factory}``; else None
-    (a built-in zoo id, handled by ``_battle_vs_opponent`` directly).
+) -> tuple[dict, HardwareSpec] | None:
+    """If ``opponent_id`` names a saved custom opponent, return
+    ``(extra_opponents, enemy_hw_spec)`` where ``extra_opponents`` maps
+    ``{id: DslOpponent factory}`` and ``enemy_hw_spec`` is the opponent's saved
+    HardwareSpec; else None (a built-in zoo id, handled by
+    ``_battle_vs_opponent`` directly).
 
-    Appends the standard-chassis note to ``notes`` when a custom opponent is
-    used, since its saved hardware_spec does not regenerate the enemy body.
+    The custom opponent now fights on ITS OWN chassis/motors: the returned
+    spec is threaded into the env as ``enemy_hardware_spec`` so the enemy body
+    is generated from it and its drive caps come from spec.drivetrain. A note
+    is appended recording that the custom hardware is in effect.
     """
     from webapp.backend import opponents_store
 
@@ -315,9 +327,13 @@ def _resolve_custom_opponent(
     from webapp.shared.opponent_dsl import OpponentDSL
 
     dsl = OpponentDSL.from_dict(record["behavior_dsl"])
-    if record.get("notes"):
-        notes.append(record["notes"])
-    return {opponent_id: lambda: DslOpponent(dsl)}
+    enemy_spec = HardwareSpec.from_dict(record["hardware_spec"])
+    notes.append(
+        "Custom opponent fights on its own hardware: the enemy chassis, "
+        "wheels, wedge, mass and motor caps come from its saved HardwareSpec "
+        "(its behavior_dsl still drives the controller)."
+    )
+    return {opponent_id: lambda: DslOpponent(dsl)}, enemy_spec
 
 
 def run_battle(req: dict[str, Any]) -> dict[str, Any]:
@@ -364,8 +380,11 @@ def run_battle(req: dict[str, Any]) -> dict[str, Any]:
     # DslOpponent factory from its behavior_dsl and hand it to the env's
     # extra_opponents seam. Built-in zoo ids leave extra_opponents None.
     extra_opponents: dict | None = None
+    enemy_hw_spec: HardwareSpec | None = None
     if b_opponent_id:
-        extra_opponents = _resolve_custom_opponent(b_opponent_id, notes)
+        resolved = _resolve_custom_opponent(b_opponent_id, notes)
+        if resolved is not None:
+            extra_opponents, enemy_hw_spec = resolved
 
     net_a = _load_policy(a_model_id)
 
@@ -382,6 +401,7 @@ def run_battle(req: dict[str, Any]) -> dict[str, Any]:
             raw, trajectory = _battle_vs_opponent(
                 net_a, b_opponent_id, rounds, mult, seed, a_spec,
                 extra_opponents=extra_opponents,
+                enemy_hw_spec=enemy_hw_spec,
             )
 
     stats = _full_stats(rounds, raw)

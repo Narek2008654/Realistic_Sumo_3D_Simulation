@@ -595,6 +595,7 @@ class MiniSumoEnv(gym.Env):
         sensor_hard_dr: bool = False,
         opponent_weights: Optional[dict] = None,
         hardware_spec: Optional[HardwareSpec] = None,
+        enemy_hardware_spec: Optional[HardwareSpec] = None,
         extra_opponents: Optional[dict] = None,
     ) -> None:
         super().__init__()
@@ -690,6 +691,19 @@ class MiniSumoEnv(gym.Env):
         self.extra_opponents: Optional[dict] = (
             dict(extra_opponents) if extra_opponents else None
         )
+        # add/ui-local: when set, the ENEMY fights on ITS OWN hardware — the
+        # chassis/wheels/wedge come from a URDF generated off this spec and the
+        # enemy's motor caps (force/omega) come from spec.drivetrain instead of
+        # the NOVAMAX_* constants. None (default) => the enemy spawns/drives
+        # EXACTLY as today (novamax / agent chassis), so the env is byte-
+        # identical and tests/audit_3d.py stays green. The opponent CONTROLLER
+        # (DSL/zoo) and its sensor model (5-key ir suite, line sensors) are
+        # unchanged; only the physical body + drive caps differ.
+        self.enemy_hw_spec: Optional[HardwareSpec] = enemy_hardware_spec
+        # Lazily-created temp dir holding the generated enemy URDF; cleaned up
+        # in close(). Only allocated when enemy_hw_spec is provided.
+        self._enemy_urdf_tmpdir = None
+        self._enemy_urdf_path: Optional[str] = None
         # When True, the blue robot is driven by keyboard (WASD / arrows)
         # instead of the NovamaxController. Requires gui=True.
         self.human_enemy = bool(human_enemy)
@@ -1024,8 +1038,35 @@ class MiniSumoEnv(gym.Env):
         cid = ids[idx]
         return cid, extra[cid]()
 
+    def _ensure_enemy_urdf(self, spec: HardwareSpec) -> str:
+        """Generate (once) a URDF for the custom-hardware enemy and return its
+        path. The file lives in a per-env temp dir cleaned up in close().
+
+        Imported lazily so the core env module can load without the web stack
+        on the import path; urdf_gen only depends on hardware_spec (no cycle).
+        """
+        if self._enemy_urdf_path is not None:
+            return self._enemy_urdf_path
+        import tempfile
+        from webapp.shared.urdf_gen import write_urdf
+
+        self._enemy_urdf_tmpdir = tempfile.TemporaryDirectory(
+            prefix="sumo_enemy_urdf_"
+        )
+        path = os.path.join(self._enemy_urdf_tmpdir.name, "enemy.urdf")
+        write_urdf(spec, path)
+        self._enemy_urdf_path = path
+        return path
+
     def _novamax_caps(self) -> tuple[float, float]:
-        """Resolve NovaMax's current (max_rad, max_force).
+        """Resolve the enemy's current (max_rad, max_force).
+
+        add/ui-local: when the enemy fights on its OWN hardware
+        (``enemy_hw_spec`` set), the caps come straight from that spec's
+        drivetrain (max_omega_rad_s -> velocity clip, max_torque_nm -> motor
+        force), NOT the NOVAMAX_* curriculum. Battery sag still scales omega
+        symmetrically. The NovaMax curriculum path below is unchanged when no
+        enemy spec is supplied (default / audit path byte-identical).
 
         ``self.novamax_torque_mult`` is the canonical curriculum knob.
         The lerp anchors on mult=1.0 (matched agent strength) and
@@ -1038,6 +1079,11 @@ class MiniSumoEnv(gym.Env):
             max_rad ≈ 35.6 rad/s (~340 RPM)
             max_force ≈ 0.063 N·m (~53% of agent's 0.12 N·m)
         """
+        if self.enemy_hw_spec is not None:
+            dt = self.enemy_hw_spec.drivetrain
+            max_rad = max(1.0, float(dt.max_omega_rad_s))
+            max_force = max(0.01, float(dt.max_torque_nm))
+            return max_rad * self._velocity_factor, max_force
         if self.novamax_torque_mult is not None:
             mult = max(NOVAMAX_TORQUE_MULT_MIN,
                        min(3.5, float(self.novamax_torque_mult)))
@@ -1611,18 +1657,34 @@ class MiniSumoEnv(gym.Env):
         # chassis (robot.urdf); enemy_chassis_dr randomizes it 50/50 per
         # episode, so the agent meets opponents on different hardware (and
         # learns the equal-power dynamics, not just the novamax chassis).
-        use_agent_chassis = self.enemy_as_agent or (
-            self.enemy_chassis_dr and self._np_random.random() < 0.5)
-        enemy_urdf = ROBOT_URDF if use_agent_chassis else NOVAMAX_URDF
+        # add/ui-local: a custom-hardware opponent fights on ITS OWN body — a
+        # URDF generated off enemy_hw_spec (same named wheel joints as the
+        # agent, so _spawn_robot's lookup is unchanged). This takes precedence
+        # over the chassis-DR knobs. The mass comes from the spec (the heavy
+        # chassis stays heavy); the NOVAMAX-style enemy mass-DR is skipped so
+        # the custom body's physical identity is preserved.
+        if self.enemy_hw_spec is not None:
+            enemy_urdf = self._ensure_enemy_urdf(self.enemy_hw_spec)
+        else:
+            use_agent_chassis = self.enemy_as_agent or (
+                self.enemy_chassis_dr and self._np_random.random() < 0.5)
+            enemy_urdf = ROBOT_URDF if use_agent_chassis else NOVAMAX_URDF
         self.enemy_id, enemy_joints = self._spawn_robot(
             enemy_pos, enemy_yaw, ENEMY_RGBA, urdf_path=enemy_urdf,
         )
         self._enemy_left_idx = enemy_joints["left_wheel_joint"]
         self._enemy_right_idx = enemy_joints["right_wheel_joint"]
-        enemy_mass_mult = float(self._np_random.uniform(*DR_MASS_RANGE))
-        p.changeDynamics(
-            self.enemy_id, -1, mass=ROBOT_MASS_NOMINAL * enemy_mass_mult,
-        )
+        if self.enemy_hw_spec is not None:
+            # Keep the spec's true base mass (no DR jitter) so the custom
+            # chassis's push/inertia matches what the user designed.
+            p.changeDynamics(
+                self.enemy_id, -1, mass=self.enemy_hw_spec.chassis.mass_kg,
+            )
+        else:
+            enemy_mass_mult = float(self._np_random.uniform(*DR_MASS_RANGE))
+            p.changeDynamics(
+                self.enemy_id, -1, mass=ROBOT_MASS_NOMINAL * enemy_mass_mult,
+            )
 
         # Step 8: draw a fresh opponent from the zoo each episode (or
         # honour `force_opponent_id` when the eval / debugging caller
@@ -2157,3 +2219,11 @@ class MiniSumoEnv(gym.Env):
         if p.isConnected(self._client_id):
             p.disconnect(self._client_id)
         self._client_id = -1
+        # add/ui-local: drop the generated enemy URDF temp dir (if any).
+        if self._enemy_urdf_tmpdir is not None:
+            try:
+                self._enemy_urdf_tmpdir.cleanup()
+            except OSError:  # pragma: no cover - best-effort cleanup
+                pass
+            self._enemy_urdf_tmpdir = None
+            self._enemy_urdf_path = None
