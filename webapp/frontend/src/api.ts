@@ -2,6 +2,8 @@
 // Vite dev proxy (/api -> http://127.0.0.1:8000), so paths are relative.
 
 import type {
+  BattleBody,
+  BattleResult,
   EvalMode,
   Geometry,
   HardwareSpec,
@@ -151,4 +153,17 @@ export const api = {
   // Trajectory JSON for a job's checkpoint step (kinematics only).
   getTrajectory: (job: string, step: number | string) =>
     request<Trajectory>(`/api/trajectories/${job}/${step}`),
+
+  // ---- Arena ---------------------------------------------------------------
+  // Run a head-to-head battle (synchronous, real physics — keep rounds small).
+  // Returns aggregated stats + a recorded representative trajectory.
+  runBattle: (body: BattleBody) =>
+    request<BattleResult>('/api/battle', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  // Re-read a previously recorded battle trajectory.
+  getBattleTrajectory: (battleId: string) =>
+    request<Trajectory>(`/api/battle/${battleId}/trajectory`),
 };

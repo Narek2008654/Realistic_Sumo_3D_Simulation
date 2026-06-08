@@ -1,5 +1,6 @@
 import { Navigate, Route, Routes } from 'react-router-dom';
 import { AppShell } from './components/AppShell';
+import Arena from './pages/Arena';
 import ComingSoon from './pages/ComingSoon';
 import Hardware from './pages/Hardware';
 import Models from './pages/Models';
@@ -15,15 +16,7 @@ export default function App() {
         <Route path="/robots" element={<Robots />} />
         <Route path="/models" element={<Models />} />
         <Route path="/train" element={<Train />} />
-        <Route
-          path="/arena"
-          element={
-            <ComingSoon
-              section="Arena"
-              blurb="Stage head-to-head battles between checkpoints and the opponent zoo, scrub the dohyo-cam replay, and read win / self-out / push statistics."
-            />
-          }
-        />
+        <Route path="/arena" element={<Arena />} />
         <Route
           path="/opponents"
           element={

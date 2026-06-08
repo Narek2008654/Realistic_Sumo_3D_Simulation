@@ -25,9 +25,14 @@ JOBS_DIR: Path = DATA / "jobs"
 # robot.urdf). Local-only, regenerable from the UI — never committed.
 ROBOTS_DIR: Path = DATA / "robots"
 
+# ARENA battle artifacts live under ``data/battles/<battle_id>/``
+# (trajectory.json). Local-only, regenerable — never committed.
+BATTLES_DIR: Path = DATA / "battles"
+
 
 def ensure_dirs() -> None:
     """Create the writable data sub-trees if they don't already exist."""
     REGISTRY_DIR.mkdir(parents=True, exist_ok=True)
     JOBS_DIR.mkdir(parents=True, exist_ok=True)
     ROBOTS_DIR.mkdir(parents=True, exist_ok=True)
+    BATTLES_DIR.mkdir(parents=True, exist_ok=True)

@@ -302,6 +302,38 @@ export interface TrainJobSummary {
   running: boolean;
 }
 
+// ---- Arena battles ----------------------------------------------------------
+
+/** Body for POST /api/battle. Exactly one of `b_model_id` / `b_opponent_id`. */
+export interface BattleBody {
+  a_model_id: string;
+  b_model_id?: string;
+  b_opponent_id?: string;
+  rounds?: number;
+  mult?: number;
+  seed?: number;
+  a_spec?: HardwareSpec;
+  b_spec?: HardwareSpec;
+}
+
+/** Aggregated win/loss stats across the battle's rounds. */
+export interface BattleStats {
+  rounds: number;
+  a_wins: number;
+  b_wins: number;
+  draws: number;
+  timeouts: number;
+  a_self_out: number;
+  b_self_out: number;
+}
+
+export interface BattleResult {
+  battle_id: string;
+  stats: BattleStats;
+  trajectory: Trajectory;
+  notes?: string;
+}
+
 // ---- Trajectory replay ------------------------------------------------------
 
 export interface FramePose {
