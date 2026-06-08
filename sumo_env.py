@@ -1043,22 +1043,27 @@ class MiniSumoEnv(gym.Env):
             # distribution, byte-identical to no-extra behaviour).
             return sample_opponent(self._np_random, self.opponent_weights)
 
-        # Built-in side keeps its own (possibly default) weights.
+        def _draw_custom():
+            ids = list(custom_w)
+            probs = [custom_w[i] / custom_total for i in ids]
+            idx = int(self._np_random.choice(len(ids), p=probs))
+            cid = ids[idx]
+            return cid, extra[cid]()
+
+        # Custom-only mix: the built-in weight map is all-zero, which
+        # sample_opponent rejects — draw straight from the custom ids (lets a
+        # roster of only custom opponents, e.g. several Heavy Dodgers, train).
+        builtin_total = sum(float(wmap.get(name, 0.0)) for name in OPPONENT_WEIGHTS)
+        if builtin_total <= 0.0:
+            return _draw_custom()
+
+        # Mixed: built-in side keeps its own weights; pick custom-vs-built-in by
+        # their relative total weights.
         builtin_id, builtin_ctrl = sample_opponent(self._np_random, self.opponent_weights)
-        # Mix: pick custom-vs-builtin by their relative total weights. The
-        # built-in total is whatever sample_opponent normalised over.
-        builtin_total = sum(
-            float(wmap.get(name, 0.0)) for name in OPPONENT_WEIGHTS
-        )
         grand = builtin_total + custom_total
-        if grand <= 0.0 or self._np_random.random() < (builtin_total / grand):
+        if self._np_random.random() < (builtin_total / grand):
             return builtin_id, builtin_ctrl
-        # Draw a custom id proportional to its weight.
-        ids = list(custom_w)
-        probs = [custom_w[i] / custom_total for i in ids]
-        idx = int(self._np_random.choice(len(ids), p=probs))
-        cid = ids[idx]
-        return cid, extra[cid]()
+        return _draw_custom()
 
     def _select_opponent(self) -> None:
         """Draw this episode's opponent id + controller into
