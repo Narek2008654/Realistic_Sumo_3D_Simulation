@@ -87,11 +87,15 @@ _active: Optional[_ActiveJob] = None
 
 
 def active_job_id() -> Optional[str]:
-    """The id of the currently-running job, or ``None`` if idle."""
+    """The id of the currently-running job, or ``None`` if idle.
+
+    Prefers the in-process handle; falls back to a disk re-adopt so the active
+    job is still found after a backend reload/restart.
+    """
     with _lock:
         if _active is not None and _active.proc.poll() is None:
             return _active.job_id
-        return None
+    return _disk_running_job()
 
 
 # ---------------------------------------------------------------------------
@@ -288,6 +292,12 @@ def start_job(req: dict[str, Any]) -> str:
             raise JobBusyError(
                 f"a job is already running: {_active.job_id}"
             )
+        # Disk re-adopt: a job from a previous server lifetime may still be
+        # running even when _active is None (after a reload). Don't start a
+        # second trainer alongside it.
+        disk_running = _disk_running_job()
+        if disk_running is not None:
+            raise JobBusyError(f"a job is already running: {disk_running}")
 
         config.ensure_dirs()
         job_id = uuid.uuid4().hex[:12]
@@ -352,14 +362,64 @@ def _job_meta(job_dir: Path) -> Optional[dict[str, Any]]:
         return None
 
 
+def _pid_alive(pid: Optional[int]) -> bool:
+    """Best-effort check that OS process ``pid`` currently exists."""
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    if os.name == "nt":
+        try:
+            out = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}", "/NH", "/FO", "CSV"],
+                capture_output=True, text=True, check=False,
+            ).stdout
+        except OSError:
+            return False
+        return f'"{pid}"' in out
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _disk_running_job() -> Optional[str]:
+    """Newest job whose launcher pid is still alive, re-adopted from disk.
+
+    Lets job tracking survive a backend reload/restart (e.g. uvicorn --reload
+    after an edit): a job counts as running if its ``job.json`` pid is alive
+    and it has not been explicitly stopped.
+    """
+    if not config.JOBS_DIR.is_dir():
+        return None
+    candidates: list[tuple[str, str]] = []
+    for child in config.JOBS_DIR.iterdir():
+        if not child.is_dir() or (child / "stopped.marker").exists():
+            continue
+        meta = _job_meta(child)
+        if meta is None or not _pid_alive(meta.get("pid")):
+            continue
+        candidates.append((meta.get("started_at") or "", meta.get("id", child.name)))
+    if not candidates:
+        return None
+    candidates.sort(reverse=True)
+    return candidates[0][1]
+
+
 def _is_alive(job_id: str) -> bool:
-    """Whether ``job_id`` is the in-process active job and still running."""
+    """Whether ``job_id`` is still running — via the in-process handle when we
+    own it, else by checking the job's launcher pid on disk (so tracking
+    survives a backend reload/restart)."""
     with _lock:
-        return (
-            _active is not None
-            and _active.job_id == job_id
-            and _active.proc.poll() is None
-        )
+        if (_active is not None and _active.job_id == job_id
+                and _active.proc.poll() is None):
+            return True
+    job_dir = config.JOBS_DIR / job_id
+    if (job_dir / "stopped.marker").exists():
+        return False
+    meta = _job_meta(job_dir)
+    return _pid_alive(meta.get("pid") if meta else None)
 
 
 def _exit_code(job_id: str) -> Optional[int]:
@@ -378,8 +438,7 @@ def status(job_id: Optional[str] = None) -> dict[str, Any]:
     ``latest_checkpoint`` is the most recent ``checkpoint`` event (or None).
     """
     if job_id is None:
-        with _lock:
-            job_id = _active.job_id if _active is not None else None
+        job_id = active_job_id()
         if job_id is None:
             return {
                 "state": "idle", "running": False, "config": None,
