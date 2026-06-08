@@ -259,6 +259,7 @@ def train():
     if _rc:
         global _RUN_CFG, _HW_SPEC, EVAL_EVERY, TOTAL_STEPS, MULT_PHASES
         global BEST_PATH, FINAL_PATH, RESUME
+        global LR, GAMMA, ENT_COEF, CLIP, NET_ARCH
         from webapp.shared import run_config, checkpoint_hook as _ch
         globals()["checkpoint_hook"] = _ch
         cfg = run_config.load(_rc)
@@ -266,10 +267,55 @@ def train():
         _HW_SPEC = cfg.hardware_spec
         EVAL_EVERY = cfg.eval_every
         _opp_weights = cfg.opponent_weights
-        # Single mult phase at the existing top mult, sized to the job budget.
-        top_mult = MULT_PHASES[-1][0]
-        MULT_PHASES = ((top_mult, int(cfg.total_steps)),)
+
+        # Hyperparam overrides from the job config. Each key maps onto its
+        # matching module constant; absent keys leave the default untouched.
+        _is_finetune = bool(cfg.resume_path)
+        _hp = cfg.hyperparams or {}
+        _applied: dict[str, object] = {}
+        if "lr" in _hp:
+            LR = float(_hp["lr"]); _applied["lr"] = LR
+        if "gamma" in _hp:
+            GAMMA = float(_hp["gamma"]); _applied["gamma"] = GAMMA
+        if "ent_coef" in _hp:
+            ENT_COEF = float(_hp["ent_coef"]); _applied["ent_coef"] = ENT_COEF
+        if "clip" in _hp:
+            CLIP = float(_hp["clip"]); _applied["clip"] = CLIP
+        if "net_arch" in _hp:
+            if _is_finetune:
+                # Finetune loads weights into a net built at NET_ARCH, so the
+                # arch must match the resumed checkpoint — drop the override.
+                print(
+                    "[E1f] net_arch override ignored (finetune: arch must "
+                    "match the resumed checkpoint)", flush=True,
+                )
+            else:
+                NET_ARCH = tuple(int(x) for x in _hp["net_arch"])
+                _applied["net_arch"] = NET_ARCH
+
+        # Single mult phase sized to the job budget. Mult precedence: explicit
+        # cfg.start_mult (or a start_mult inside the generic hyperparams bag)
+        # -> finetune default 3.0 (full power, matching the existing
+        # PPO_RESUME "fixed mult 3.0" behavior) -> the trainer's top mult for
+        # scratch.
+        _start_mult = cfg.start_mult
+        if _start_mult is None and "start_mult" in _hp:
+            _start_mult = _hp["start_mult"]
+        if _start_mult is not None:
+            phase_mult = float(_start_mult)
+        elif _is_finetune:
+            phase_mult = 3.0
+        else:
+            phase_mult = MULT_PHASES[-1][0]
+        MULT_PHASES = ((phase_mult, int(cfg.total_steps)),)
         TOTAL_STEPS = int(cfg.total_steps)
+        print(
+            f"[E1f] hyperparams: applied={_applied} phase_mult={phase_mult} "
+            f"finetune={_is_finetune} "
+            f"(LR={LR} GAMMA={GAMMA} ENT_COEF={ENT_COEF} CLIP={CLIP} "
+            f"NET_ARCH={NET_ARCH})",
+            flush=True,
+        )
         if cfg.output_best_path:
             BEST_PATH = pathlib.Path(cfg.output_best_path)
         if cfg.output_final_path:
@@ -380,7 +426,11 @@ def train():
                 torch.as_tensor(obs, dtype=torch.float32).unsqueeze(0))
             last_value = float(last_value.item())
 
-        adv, returns = compute_gae(b_rew, b_val, b_done, last_value)
+        # Pass GAMMA explicitly so an E1f hyperparam override reaches GAE (the
+        # default arg was bound at import, before the seam can reassign GAMMA).
+        adv, returns = compute_gae(
+            b_rew, b_val, b_done, last_value, gamma=GAMMA,
+        )
         # advantage normalization (critics' fix for the 4-OOM reward scale)
         adv = (adv - adv.mean()) / (adv.std() + 1e-8)
 

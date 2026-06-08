@@ -12,6 +12,11 @@ from typing import Any
 
 from fastapi import APIRouter, Body, HTTPException
 
+from opponents import (
+    HELD_OUT_OPPONENT_IDS,
+    OPPONENT_REGISTRY,
+    OPPONENT_WEIGHTS,
+)
 from webapp.backend import training
 from webapp.backend.services import recommender
 from webapp.shared.hardware_spec import HardwareSpec
@@ -73,6 +78,28 @@ def recommend(body: dict[str, Any] = Body(...)) -> dict[str, Any]:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
     mode = str(body.get("mode", "scratch"))
     return recommender.recommend(spec, mode)
+
+
+@router.get("/opponents")
+def list_opponents() -> dict[str, Any]:
+    """The opponent zoo for the UI's opponent-weight editor.
+
+    Returns each opponent's id, its default sampling weight, and whether it is
+    held out from training (zero-shot eval only). ``weights_normalized`` is
+    True because :func:`opponents.sample_opponent` re-normalises the weight
+    vector to sum to 1 at draw time, so UI-supplied weights need only be
+    non-negative with a positive total — they do not have to sum to 1.
+    """
+    held = set(HELD_OUT_OPPONENT_IDS)
+    opponents = [
+        {
+            "id": name,
+            "default_weight": OPPONENT_WEIGHTS.get(name, 0.0),
+            "held_out": name in held,
+        }
+        for name in OPPONENT_REGISTRY
+    ]
+    return {"opponents": opponents, "weights_normalized": True}
 
 
 @router.get("/status/{job_id}")

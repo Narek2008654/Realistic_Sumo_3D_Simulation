@@ -839,7 +839,9 @@ def main() -> None:
     if _rc:
         global _RUN_CFG, _HW_SPEC, EVAL_EVERY
         global ONLINE_TIMESTEPS_PER_PHASE, FINETUNE_PHASES
-        global BEST_PATH, FINAL_PATH, RESUME_CHECKPOINT_PATH
+        global BEST_PATH, FINAL_PATH, RESUME_CHECKPOINT_PATH, CONTINUE_TRAINING
+        global CONTINUE_BEST_PATH, CONTINUE_FINAL_PATH
+        global ONLINE_LR, GAMMA, N_STEP, TAU, NET_ARCH
         from webapp.shared import run_config, checkpoint_hook as _ch
         globals()["checkpoint_hook"] = _ch
         cfg = run_config.load(_rc)
@@ -847,18 +849,68 @@ def main() -> None:
         _HW_SPEC = cfg.hardware_spec
         EVAL_EVERY = cfg.eval_every
         cfg.eval_every = cfg.eval_every  # (kept on cfg for the hook)
-        # Override the online curriculum to the job's total step budget. The
-        # job runs a single zoo phase at the existing top mult so total_steps
-        # is honoured exactly; opponent mix comes from opponent_weights.
-        top_mult = ONLINE_TIMESTEPS_PER_PHASE[-1][0]
-        ONLINE_TIMESTEPS_PER_PHASE = ((top_mult, int(cfg.total_steps), None),)
-        FINETUNE_PHASES = ((top_mult, int(cfg.total_steps), None),)
+
+        # Hyperparam overrides from the job config. Each key maps onto its
+        # matching module constant; absent keys leave the default untouched.
+        _is_finetune = bool(cfg.resume_path)
+        _hp = cfg.hyperparams or {}
+        _applied: dict[str, object] = {}
+        if "lr" in _hp:
+            ONLINE_LR = float(_hp["lr"]); _applied["lr"] = ONLINE_LR
+        if "gamma" in _hp:
+            GAMMA = float(_hp["gamma"]); _applied["gamma"] = GAMMA
+        if "n_step" in _hp:
+            N_STEP = int(_hp["n_step"]); _applied["n_step"] = N_STEP
+        if "tau" in _hp:
+            TAU = float(_hp["tau"]); _applied["tau"] = TAU
+        if "net_arch" in _hp:
+            if _is_finetune:
+                # Finetune rebuilds the net at the resume checkpoint's arch, so
+                # a net_arch override would be ignored / mismatch — drop it.
+                print(
+                    "[E1f] net_arch override ignored (finetune: arch must "
+                    "match the resumed checkpoint)", flush=True,
+                )
+            else:
+                NET_ARCH = tuple(int(x) for x in _hp["net_arch"])
+                _applied["net_arch"] = NET_ARCH
+
+        # Curriculum start mult. The job runs a single zoo phase sized to the
+        # job budget. Mult precedence: explicit cfg.start_mult (or a
+        # start_mult inside the generic hyperparams bag) -> finetune default
+        # 3.0 (full power, matching the alg/improvment finetune) -> the
+        # trainer's existing top mult for scratch.
+        _start_mult = cfg.start_mult
+        if _start_mult is None and "start_mult" in _hp:
+            _start_mult = _hp["start_mult"]
+        if _start_mult is not None:
+            phase_mult = float(_start_mult)
+        elif _is_finetune:
+            phase_mult = 3.0
+        else:
+            phase_mult = ONLINE_TIMESTEPS_PER_PHASE[-1][0]
+        ONLINE_TIMESTEPS_PER_PHASE = ((phase_mult, int(cfg.total_steps), None),)
+        FINETUNE_PHASES = ((phase_mult, int(cfg.total_steps), None),)
+        print(
+            f"[E1f] hyperparams: applied={_applied} phase_mult={phase_mult} "
+            f"finetune={_is_finetune} "
+            f"(ONLINE_LR={ONLINE_LR} GAMMA={GAMMA} N_STEP={N_STEP} TAU={TAU} "
+            f"NET_ARCH={NET_ARCH})",
+            flush=True,
+        )
         if cfg.output_best_path:
             BEST_PATH = Path(cfg.output_best_path)
+            # The resume/CONTINUE path writes to CONTINUE_*; keep job outputs
+            # inside the job dir, not the committed checkpoints/ tree.
+            CONTINUE_BEST_PATH = BEST_PATH
         if cfg.output_final_path:
             FINAL_PATH = Path(cfg.output_final_path)
+            CONTINUE_FINAL_PATH = FINAL_PATH
         if cfg.resume_path:
             RESUME_CHECKPOINT_PATH = Path(cfg.resume_path)
+            # Resume-from-checkpoint: skip Phase 0a/0b and go straight to the
+            # single-phase online finetune from the base model.
+            CONTINUE_TRAINING = True
         print(
             f"[E1f] job config active: {_rc}\n"
             f"      total_steps={cfg.total_steps} eval_every={cfg.eval_every} "

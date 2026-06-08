@@ -21,8 +21,17 @@ JSON schema (all keys optional except ``algo`` and ``total_steps``)::
       "opponent_weights": {"novamax": 1.0, ...} | null,
       "resume_path": "<path>.pt" | null,
       "hardware_spec": {<HardwareSpec.to_dict()>} | null,
-      "seed": 42
+      "seed": 42,
+      "start_mult": 3.0 | null,
+      "hyperparams": {"lr": 5e-5, "gamma": 0.99, ...}
     }
+
+``start_mult`` overrides the single-phase curriculum torque-multiplier the
+trainer collapses to under a job config (None => keep the trainer's default
+behavior, i.e. top-mult for scratch / 3.0 for finetune). ``hyperparams`` is a
+generic free-form override bag the trainer maps onto its matching module
+constants (``lr``, ``gamma``, ``net_arch``, and algo-specific knobs); unknown
+keys are ignored.
 """
 
 from __future__ import annotations
@@ -54,6 +63,8 @@ class TrainingConfig:
     resume_path: Optional[str] = None
     hardware_spec: Optional[HardwareSpec] = None
     seed: int = 42
+    start_mult: Optional[float] = None
+    hyperparams: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialise to a plain JSON-ready dict.
@@ -106,4 +117,10 @@ def load(path: str | Path) -> TrainingConfig:
         resume_path=data.get("resume_path"),
         hardware_spec=hardware_spec,
         seed=int(data.get("seed", 42)),
+        start_mult=(
+            float(data["start_mult"])
+            if data.get("start_mult") is not None
+            else None
+        ),
+        hyperparams=dict(data.get("hyperparams") or {}),
     )

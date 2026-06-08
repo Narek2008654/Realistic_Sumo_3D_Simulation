@@ -176,6 +176,19 @@ def _build_config(req: dict[str, Any], job_dir: Path) -> TrainingConfig:
     if opponent_weights is not None and not isinstance(opponent_weights, dict):
         raise JobError("opponent_weights must be an object or null")
 
+    start_mult = req.get("start_mult")
+    if start_mult is not None:
+        try:
+            start_mult = float(start_mult)
+        except (TypeError, ValueError) as exc:
+            raise JobError("start_mult must be a number or null") from exc
+        if start_mult <= 0:
+            raise JobError("start_mult must be positive")
+
+    hyperparams = req.get("hyperparams") or {}
+    if not isinstance(hyperparams, dict):
+        raise JobError("hyperparams must be an object or null")
+
     return TrainingConfig(
         algo=algo,
         total_steps=total_steps,
@@ -187,6 +200,8 @@ def _build_config(req: dict[str, Any], job_dir: Path) -> TrainingConfig:
         resume_path=resume_path,
         hardware_spec=spec,
         seed=int(req.get("seed") or 42),
+        start_mult=start_mult,
+        hyperparams=dict(hyperparams),
     )
 
 

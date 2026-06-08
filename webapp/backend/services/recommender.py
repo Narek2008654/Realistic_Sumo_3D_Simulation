@@ -97,17 +97,28 @@ def recommend(spec: HardwareSpec, mode: str) -> dict[str, Any]:
     total_steps = _FINETUNE_STEPS if is_finetune else _SCRATCH_STEPS
     eval_every = _DEFAULT_EVAL_EVERY
     net_arch = _net_arch(spec)
-    start_mult = _start_mult(spec)
     algo = _algo(mode)
 
-    # A small, documented hyperparameter block. Finetune uses a lower LR and a
-    # shorter exploration horizon since it refines rather than learns afresh.
+    # Finetune runs at full power (the curriculum's top torque-mult), matching
+    # the trainers' resume default; scratch starts from the drivetrain-derived
+    # mult so a weaker robot faces a gentler opponent to begin with.
+    start_mult = 3.0 if is_finetune else _start_mult(spec)
+
+    # A small, documented hyperparameter block of the knobs the trainer seam
+    # honours. Defaults mirror the trainer module constants (train_dqn_3d.py:
+    # ONLINE_LR/GAMMA/N_STEP/TAU; train_ppo_3d.py: LR/GAMMA/ENT_COEF/CLIP).
+    # Finetune uses a lower LR since it refines rather than learns afresh.
     hyperparams = {
         "lr": 1e-4 if is_finetune else 3e-4,
+        "net_arch": net_arch,
+        "start_mult": start_mult,
         "gamma": 0.99,
-        "batch_size": 256,
-        "eps_start": 0.12 if is_finetune else 1.0,
-        "eps_end": 0.05,
+        # DQN-specific (train_dqn_3d.py defaults).
+        "n_step": 3,
+        "tau": 0.005,
+        # PPO-specific (train_ppo_3d.py defaults).
+        "ent_coef": 0.02,
+        "clip": 0.2,
     }
 
     est_minutes = round(total_steps / _ENV_STEPS_PER_SEC / 60.0, 1)
