@@ -376,9 +376,13 @@ export interface OpponentValidateResult {
 
 // ---- Arena battles ----------------------------------------------------------
 
-/** Body for POST /api/battle. Exactly one of `b_model_id` / `b_opponent_id`. */
+export type BattleMode = 'single' | 'gauntlet';
+
+/** Body for POST /api/battle. For `single` (default) exactly one of
+ *  `b_model_id` / `b_opponent_id`; for `gauntlet` side B is ignored. */
 export interface BattleBody {
   a_model_id: string;
+  mode?: BattleMode;
   b_model_id?: string;
   b_opponent_id?: string;
   rounds?: number;
@@ -386,6 +390,8 @@ export interface BattleBody {
   seed?: number;
   a_spec?: HardwareSpec;
   b_spec?: HardwareSpec;
+  include_held_out?: boolean;
+  include_custom?: boolean;
 }
 
 /** Aggregated win/loss stats across the battle's rounds. */
@@ -399,10 +405,32 @@ export interface BattleStats {
   b_self_out: number;
 }
 
+/** Per-round summary; load its trajectory via getBattleRoundTrajectory(ref). */
+export interface BattleRound {
+  index: number;
+  opponent_id: string | null;
+  winner: 'agent' | 'enemy' | null;
+  reason: string;
+  trajectory_ref: string;
+}
+
+/** One opponent's block in a gauntlet result. */
+export interface GauntletOpponentResult {
+  opponent_id: string;
+  stats: BattleStats;
+  rounds: BattleRound[];
+}
+
 export interface BattleResult {
   battle_id: string;
-  stats: BattleStats;
-  trajectory: Trajectory;
+  mode?: BattleMode;
+  // single
+  stats?: BattleStats;
+  rounds?: BattleRound[];
+  trajectory?: Trajectory;
+  // gauntlet
+  per_opponent?: GauntletOpponentResult[];
+  overall_stats?: BattleStats;
   notes?: string;
 }
 

@@ -16,7 +16,7 @@
 // Battles run REAL physics on the backend and are synchronous — keep rounds
 // small. The FIGHT button is disabled while a battle is in flight.
 
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api, ApiError } from '../api';
 import { Panel, Reveal, StatusPill } from '../components/ui';
 import { SliderField } from '../components/fields';
@@ -24,14 +24,41 @@ import { TrajectoryPlayer } from '../components/TrajectoryPlayer';
 import type {
   BattleBody,
   BattleResult,
+  BattleRound,
   BattleStats,
   CustomOpponentSummary,
+  GauntletOpponentResult,
   HardwareSpec,
   ModelCard,
   TrainOpponent,
+  Trajectory,
 } from '../types';
 
-type SideBKind = 'opponent' | 'model';
+type SideBKind = 'opponent' | 'model' | 'gauntlet';
+
+// Outcome chip vocabulary shared by the round strip + leaderboard, keyed by the
+// trajectory `reason` (agent == side A).
+const ROUND_OUTCOME: Record<string, { label: string; color: string }> = {
+  win: { label: 'WIN', color: 'var(--win)' },
+  self_out: { label: 'SELF-OUT', color: 'var(--loss)' },
+  push_loss: { label: 'PUSH', color: 'var(--loss)' },
+  mutual_out: { label: 'DRAW', color: 'var(--warn)' },
+  timeout: { label: 'TIMEOUT', color: 'var(--idle)' },
+};
+
+function roundOutcome(reason: string) {
+  return ROUND_OUTCOME[reason] ?? { label: reason.toUpperCase(), color: 'var(--idle)' };
+}
+
+const EMPTY_STATS: BattleStats = {
+  rounds: 0,
+  a_wins: 0,
+  b_wins: 0,
+  draws: 0,
+  timeouts: 0,
+  a_self_out: 0,
+  b_self_out: 0,
+};
 
 // A model is "battle-ready" if we can default-pick a strong, on-the-canonical
 // 21-obs / 9-act contract (the ppo_robust / stageA family). Falls back to the
@@ -237,6 +264,151 @@ function StatsPanel({
 }
 
 // ---------------------------------------------------------------------------
+// Round strip — every round of a battle as clickable outcome chips. The active
+// round is highlighted; clicking one asks the parent to load that round.
+// ---------------------------------------------------------------------------
+function RoundStrip({
+  rounds,
+  activeRef,
+  onPick,
+}: {
+  rounds: BattleRound[];
+  activeRef: string | null;
+  onPick: (r: BattleRound) => void;
+}) {
+  return (
+    <div className="flex flex-wrap gap-2">
+      {rounds.map((r) => {
+        const oc = roundOutcome(r.reason);
+        const active = r.trajectory_ref === activeRef;
+        return (
+          <button
+            key={r.trajectory_ref}
+            type="button"
+            onClick={() => onPick(r)}
+            className="num flex items-center gap-2 rounded border px-2.5 py-1.5"
+            style={{
+              fontSize: 11,
+              cursor: 'pointer',
+              borderColor: active ? oc.color : 'var(--line)',
+              background: active ? 'var(--bg-3)' : 'var(--bg-2)',
+              boxShadow: active ? `0 0 8px ${oc.color}55` : 'none',
+            }}
+            title={`Round ${r.index + 1}${r.opponent_id ? ` · ${r.opponent_id}` : ''} · ${oc.label}`}
+          >
+            <span className="text-fg-2" style={{ fontSize: 10 }}>
+              R{r.index + 1}
+            </span>
+            <span
+              className="inline-flex h-1.5 w-1.5 rounded-full"
+              style={{ background: oc.color, boxShadow: `0 0 6px ${oc.color}` }}
+            />
+            <span style={{ color: oc.color, fontSize: 10, letterSpacing: '.06em' }}>
+              {oc.label}
+            </span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Gauntlet leaderboard — one row per opponent, sorted by A win-rate. Each row
+// is expandable to its round strip; the active opponent/round drive the shared
+// TrajectoryPlayer in the parent.
+// ---------------------------------------------------------------------------
+function winRate(s: BattleStats): number {
+  return s.rounds > 0 ? s.a_wins / s.rounds : 0;
+}
+
+function GauntletLeaderboard({
+  perOpponent,
+  expandedId,
+  setExpandedId,
+  activeRef,
+  onPickRound,
+}: {
+  perOpponent: GauntletOpponentResult[];
+  expandedId: string | null;
+  setExpandedId: (id: string | null) => void;
+  activeRef: string | null;
+  onPickRound: (opponentId: string, r: BattleRound) => void;
+}) {
+  const sorted = useMemo(
+    () => [...perOpponent].sort((a, b) => winRate(b.stats) - winRate(a.stats)),
+    [perOpponent],
+  );
+
+  return (
+    <Panel title="Gauntlet · per-opponent leaderboard" live ticks bodyClassName="flex flex-col p-0">
+      {sorted.map((po, idx) => {
+        const wr = winRate(po.stats);
+        const expanded = po.opponent_id === expandedId;
+        return (
+          <div
+            key={po.opponent_id}
+            className="flex flex-col"
+            style={{ borderTop: idx === 0 ? 'none' : '1px solid var(--line)' }}
+          >
+            <button
+              type="button"
+              onClick={() => setExpandedId(expanded ? null : po.opponent_id)}
+              className="grid items-center gap-3 px-4 py-2.5 text-left"
+              style={{
+                gridTemplateColumns: '16px 120px minmax(0,1fr) 150px',
+                background: expanded ? 'var(--bg-2)' : 'transparent',
+                border: 'none',
+                cursor: 'pointer',
+              }}
+            >
+              <span className="num text-fg-2" style={{ fontSize: 11 }}>
+                {expanded ? '▾' : '▸'}
+              </span>
+              <span className="font-display uppercase" style={{ fontSize: 13, color: 'var(--fg-0)', letterSpacing: '.04em' }}>
+                {po.opponent_id}
+              </span>
+              <div className="flex items-center gap-2">
+                <div className="h-1.5 flex-1 overflow-hidden rounded" style={{ background: 'var(--bg-3)' }}>
+                  <div
+                    className="h-full rounded"
+                    style={{
+                      width: `${wr * 100}%`,
+                      background: 'var(--accent)',
+                      boxShadow: '0 0 8px var(--accent)',
+                      transition: 'width .4s ease',
+                    }}
+                  />
+                </div>
+                <span className="num" style={{ fontSize: 12, color: 'var(--accent)', minWidth: 42, textAlign: 'right' }}>
+                  {(wr * 100).toFixed(0)}%
+                </span>
+              </div>
+              <span className="num text-fg-1" style={{ fontSize: 11, textAlign: 'right' }}>
+                <span style={{ color: 'var(--accent)' }}>{po.stats.a_wins}W</span>
+                {' / '}
+                <span style={{ color: 'var(--cyan)' }}>{po.stats.b_wins}L</span>
+                {' / '}
+                <span style={{ color: 'var(--loss)' }}>{po.stats.a_self_out}SO</span>
+              </span>
+            </button>
+            {expanded && (
+              <div className="px-4 pb-3 pt-1">
+                <RoundStrip
+                  rounds={po.rounds}
+                  activeRef={activeRef}
+                  onPick={(r) => onPickRound(po.opponent_id, r)}
+                />
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </Panel>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Page
 // ---------------------------------------------------------------------------
 export default function Arena() {
@@ -253,6 +425,18 @@ export default function Arena() {
   const [rounds, setRounds] = useState(5);
   const [mult, setMult] = useState(3.0);
   const [seed, setSeed] = useState(4242);
+
+  // Gauntlet options
+  const [includeHeldOut, setIncludeHeldOut] = useState(false);
+  const [includeCustom, setIncludeCustom] = useState(false);
+
+  // Replay state — which round's trajectory is loaded into the player. For
+  // gauntlet, expandedId tracks the open leaderboard row.
+  const [activeRef, setActiveRef] = useState<string | null>(null);
+  const [activeTraj, setActiveTraj] = useState<Trajectory | null>(null);
+  const [activeLabel, setActiveLabel] = useState<string>('');
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [loadingTraj, setLoadingTraj] = useState(false);
 
   // Side-A hardware tweak
   const [defaultSpec, setDefaultSpec] = useState<HardwareSpec | null>(null);
@@ -306,25 +490,59 @@ export default function Arena() {
   );
 
   const aLabel = aModelId || '—';
-  const bLabel = bKind === 'opponent' ? bOpponentId : bModelId || '—';
+  const bLabel =
+    bKind === 'gauntlet' ? 'WHOLE ZOO' : bKind === 'opponent' ? bOpponentId : bModelId || '—';
 
   const canFight =
     !fighting &&
     !!aModelId &&
-    (bKind === 'opponent' ? !!bOpponentId : !!bModelId && bModelId !== aModelId);
+    (bKind === 'gauntlet'
+      ? true
+      : bKind === 'opponent'
+        ? !!bOpponentId
+        : !!bModelId && bModelId !== aModelId);
+
+  // Load a round's trajectory into the shared player (used by single + gauntlet
+  // round strips). `label` is the player HUD caption for that round.
+  const loadRound = useCallback(
+    async (battleId: string, r: BattleRound, label: string) => {
+      setActiveRef(r.trajectory_ref);
+      setActiveLabel(label);
+      setLoadingTraj(true);
+      try {
+        const traj = await api.getBattleRoundTrajectory(battleId, r.trajectory_ref);
+        setActiveTraj(traj);
+      } catch {
+        setActiveTraj(null);
+      } finally {
+        setLoadingTraj(false);
+      }
+    },
+    [],
+  );
 
   async function fight() {
     if (!canFight) return;
     setFighting(true);
     setError(null);
+    setActiveRef(null);
+    setActiveTraj(null);
+    setExpandedId(null);
     const body: BattleBody = {
       a_model_id: aModelId,
+      mode: bKind === 'gauntlet' ? 'gauntlet' : 'single',
       rounds,
       mult,
       seed,
     };
-    if (bKind === 'opponent') body.b_opponent_id = bOpponentId;
-    else body.b_model_id = bModelId;
+    if (bKind === 'gauntlet') {
+      body.include_held_out = includeHeldOut;
+      body.include_custom = includeCustom;
+    } else if (bKind === 'opponent') {
+      body.b_opponent_id = bOpponentId;
+    } else {
+      body.b_model_id = bModelId;
+    }
     // Send side-A's spec when hardware was overridden OR the ring size differs
     // from the default (the env reads the dohyo radius from side A's spec).
     const ringChanged =
@@ -336,6 +554,16 @@ export default function Arena() {
     try {
       const res = await api.runBattle(body);
       setResult(res);
+      // Auto-load the first round so the player is populated immediately.
+      if (res.mode === 'gauntlet') {
+        const first = res.per_opponent?.[0];
+        if (first && first.rounds.length > 0) {
+          setExpandedId(first.opponent_id);
+          await loadRound(res.battle_id, first.rounds[0], `${aLabel} vs ${first.opponent_id}`);
+        }
+      } else if (res.rounds && res.rounds.length > 0) {
+        await loadRound(res.battle_id, res.rounds[0], `${aLabel} vs ${bLabel}`);
+      }
     } catch (e) {
       setError(e instanceof ApiError ? e.message : 'Battle failed to run.');
     } finally {
@@ -346,6 +574,9 @@ export default function Arena() {
   function newSetup() {
     setResult(null);
     setError(null);
+    setActiveRef(null);
+    setActiveTraj(null);
+    setExpandedId(null);
   }
 
   return (
@@ -387,11 +618,41 @@ export default function Arena() {
               value={bKind}
               onChange={setBKind}
               options={[
-                { value: 'opponent', label: 'Zoo Opponent' },
+                { value: 'opponent', label: 'Zoo Opp' },
                 { value: 'model', label: 'Model' },
+                { value: 'gauntlet', label: 'Whole Zoo' },
               ]}
             />
-            {bKind === 'opponent' ? (
+            {bKind === 'gauntlet' ? (
+              <div className="flex flex-col gap-2">
+                <span className="num text-fg-2" style={{ fontSize: 10 }}>
+                  Side A fights EVERY seen-zoo opponent for the round count below.
+                  Per-opponent results + replays appear after the fight.
+                </span>
+                <label className="flex cursor-pointer items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={includeHeldOut}
+                    onChange={(e) => setIncludeHeldOut(e.target.checked)}
+                    style={{ accentColor: 'var(--accent)' }}
+                  />
+                  <span className="num" style={{ fontSize: 11, color: 'var(--fg-1)' }}>
+                    INCLUDE HELD-OUT (feinter, orbiter)
+                  </span>
+                </label>
+                <label className="flex cursor-pointer items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={includeCustom}
+                    onChange={(e) => setIncludeCustom(e.target.checked)}
+                    style={{ accentColor: 'var(--accent)' }}
+                  />
+                  <span className="num" style={{ fontSize: 11, color: 'var(--fg-1)' }}>
+                    INCLUDE CUSTOM OPPONENTS
+                  </span>
+                </label>
+              </div>
+            ) : bKind === 'opponent' ? (
               <select
                 className="ctl num"
                 value={bOpponentId}
@@ -546,11 +807,45 @@ export default function Arena() {
       <div className="flex flex-col gap-5">
         {result ? (
           <>
-            <Reveal index={1}>
-              <StatsPanel stats={result.stats} aLabel={aLabel} bLabel={bLabel} />
-            </Reveal>
+            {result.mode === 'gauntlet' ? (
+              <>
+                <Reveal index={1}>
+                  <StatsPanel
+                    stats={result.overall_stats ?? EMPTY_STATS}
+                    aLabel={aLabel}
+                    bLabel="ZOO (overall)"
+                  />
+                </Reveal>
+                <Reveal index={2}>
+                  <GauntletLeaderboard
+                    perOpponent={result.per_opponent ?? []}
+                    expandedId={expandedId}
+                    setExpandedId={setExpandedId}
+                    activeRef={activeRef}
+                    onPickRound={(opponentId, r) =>
+                      loadRound(result.battle_id, r, `${aLabel} vs ${opponentId}`)
+                    }
+                  />
+                </Reveal>
+              </>
+            ) : (
+              <>
+                <Reveal index={1}>
+                  <StatsPanel stats={result.stats ?? EMPTY_STATS} aLabel={aLabel} bLabel={bLabel} />
+                </Reveal>
+                <Reveal index={2}>
+                  <Panel title="Rounds · click to replay" bodyClassName="p-4">
+                    <RoundStrip
+                      rounds={result.rounds ?? []}
+                      activeRef={activeRef}
+                      onPick={(r) => loadRound(result.battle_id, r, `${aLabel} vs ${bLabel}`)}
+                    />
+                  </Panel>
+                </Reveal>
+              </>
+            )}
             {result.notes && (
-              <Reveal index={2}>
+              <Reveal index={3}>
                 <div
                   className="num rounded border px-4 py-3"
                   style={{
@@ -564,14 +859,14 @@ export default function Arena() {
                 </div>
               </Reveal>
             )}
-            <Reveal index={3} className="min-h-[420px]">
+            <Reveal index={4} className="min-h-[420px]">
               <TrajectoryPlayer
-                traj={result.trajectory}
+                traj={activeTraj}
                 agentSpec={tweakA ? aSpec : null}
-                label={`${aLabel} vs ${bLabel}`}
+                label={loadingTraj ? `${activeLabel} · loading…` : activeLabel || `${aLabel} vs ${bLabel}`}
               />
             </Reveal>
-            <Reveal index={4}>
+            <Reveal index={5}>
               <div className="flex items-center gap-3">
                 <button
                   className="btn btn-primary"

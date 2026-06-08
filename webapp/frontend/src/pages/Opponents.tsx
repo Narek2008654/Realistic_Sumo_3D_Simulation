@@ -551,7 +551,7 @@ export default function Opponents() {
               <TestVerdict result={testResult.result} />
               <div className="min-h-[360px]">
                 <TrajectoryPlayer
-                  traj={testResult.result.trajectory}
+                  traj={testResult.result.trajectory ?? null}
                   label={`${testModelId} vs ${testResult.oppName}`}
                 />
               </div>
@@ -972,7 +972,17 @@ function OpponentCardRow({
 }
 
 function TestVerdict({ result }: { result: BattleResult }) {
-  const s = result.stats;
+  // Opponent tests always run a single 1-round battle, so `stats` is present;
+  // fall back defensively in case a future caller passes a gauntlet result.
+  const s = result.stats ?? {
+    rounds: 0,
+    a_wins: 0,
+    b_wins: 0,
+    draws: 0,
+    timeouts: 0,
+    a_self_out: 0,
+    b_self_out: 0,
+  };
   const verdict =
     s.a_wins > s.b_wins
       ? { label: 'MODEL WINS', color: 'var(--accent)' }

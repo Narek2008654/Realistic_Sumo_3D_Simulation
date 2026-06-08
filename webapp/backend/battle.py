@@ -89,13 +89,13 @@ def _battle_vs_opponent(
     hw_spec: HardwareSpec | None,
     extra_opponents: dict | None = None,
     enemy_hw_spec: HardwareSpec | None = None,
-) -> tuple[dict[str, int], dict[str, Any]]:
+) -> tuple[dict[str, int], list[dict[str, Any]]]:
     """Run ``rounds`` greedy rollouts of model A vs a zoo or CUSTOM opponent.
 
-    Returns ``(stats, trajectory)``. ``trajectory`` is the first decisive
-    round's kinematics (falls back to the last round if every round timed out).
-    Mirrors ``eval_best.run_eval`` but per-round so we can record one round and
-    map outcomes to A/B wins.
+    Returns ``(stats, round_trajectories)`` where ``round_trajectories`` is a
+    list (one per round, in order) of ``{trajectory, winner, reason}``. Every
+    round's full kinematics are captured so any round can be replayed.
+    Mirrors ``eval_best.run_eval`` but per-round so we map outcomes to A/B wins.
 
     A built-in zoo id must exist in ``OPPONENT_REGISTRY``; a custom id must be
     supplied via ``extra_opponents`` (id -> controller factory), which is
@@ -113,8 +113,7 @@ def _battle_vs_opponent(
         raise BattleError(422, f"unknown opponent: {opponent_id}")
 
     stats = Counter()
-    trajectory: dict[str, Any] | None = None
-    last_traj: dict[str, Any] | None = None
+    round_trajs: list[dict[str, Any]] = []
 
     for r in range(rounds):
         env = build_env(
@@ -148,14 +147,11 @@ def _battle_vs_opponent(
         else:
             stats["draws"] += 1
 
-        last_traj = traj
-        # First decisive round wins the trajectory slot.
-        if trajectory is None and reason != "timeout":
-            trajectory = traj
+        round_trajs.append(
+            {"trajectory": traj, "winner": winner, "reason": reason}
+        )
 
-    if trajectory is None:
-        trajectory = last_traj
-    return dict(stats), trajectory
+    return dict(stats), round_trajs
 
 
 # ---------------------------------------------------------------------------
@@ -236,12 +232,16 @@ def _record_match(env_u, net_a, net_b, max_steps: int = 600):
 def _battle_vs_model(
     net_a, net_b, rounds: int, mult: float, seed: int,
     hw_spec: HardwareSpec | None,
-) -> tuple[dict[str, int], dict[str, Any]]:
+) -> tuple[dict[str, int], list[dict[str, Any]]]:
     """Model-vs-model over ``rounds`` rounds on the SAME chassis.
 
     Reuses ``agent_vs_agent``'s env construction + faithfulness convention:
     both robots spawn on the agent URDF (``respawn_enemy_as_agent_robot``) so
-    the match isolates the policies. Records the first decisive round.
+    the match isolates the policies. Records every round.
+
+    Returns ``(stats, round_trajectories)`` where ``round_trajectories`` is a
+    list (one per round) of ``{trajectory, winner, reason}`` (winner/reason in
+    the frontend trajectory vocabulary, taken from the trajectory's outcome).
     """
     import sumo_env
     from train_dqn_3d import build_env
@@ -258,8 +258,7 @@ def _battle_vs_model(
     env_u = env.unwrapped
 
     stats = Counter()
-    trajectory: dict[str, Any] | None = None
-    last_traj: dict[str, Any] | None = None
+    round_trajs: list[dict[str, Any]] = []
     try:
         for r in range(rounds):
             env.reset(seed=seed + r)
@@ -275,16 +274,16 @@ def _battle_vs_model(
                 stats["draws"] += 1
             else:
                 stats["timeouts"] += 1
-            last_traj = traj
-            if trajectory is None and winner not in ("timeout",):
-                trajectory = traj
+            round_trajs.append({
+                "trajectory": traj,
+                "winner": traj["outcome"]["winner"],
+                "reason": traj["outcome"]["reason"],
+            })
     finally:
         env.close()
         sumo_env.DR_TOF_NOISE_SIGMA_PCT = saved_noise
 
-    if trajectory is None:
-        trajectory = last_traj
-    return dict(stats), trajectory
+    return dict(stats), round_trajs
 
 
 # ---------------------------------------------------------------------------
@@ -301,6 +300,38 @@ def _full_stats(rounds: int, raw: dict[str, int]) -> dict[str, int]:
         "a_self_out": raw.get("a_self_out", 0),
         "b_self_out": raw.get("b_self_out", 0),
     }
+
+
+def _representative_index(round_trajs: list[dict[str, Any]]) -> int:
+    """Index of the first decisive round (reason != timeout), else 0."""
+    for i, rt in enumerate(round_trajs):
+        if rt["reason"] != "timeout":
+            return i
+    return 0
+
+
+def _write_rounds(
+    battle_dir: Path, round_trajs: list[dict[str, Any]],
+    opponent_id: str | None, prefix: str = "",
+) -> list[dict[str, Any]]:
+    """Persist every round's trajectory to ``<battle_dir>/<prefix>r<k>.json`` and
+    return a list of round summaries ``{index, opponent_id, winner, reason,
+    trajectory_ref}``. ``prefix`` namespaces gauntlet rounds per opponent so
+    refs never collide across opponents."""
+    summaries: list[dict[str, Any]] = []
+    for k, rt in enumerate(round_trajs):
+        ref = f"{prefix}r{k}"
+        (battle_dir / f"{ref}.json").write_text(
+            json.dumps(rt["trajectory"]), encoding="utf-8"
+        )
+        summaries.append({
+            "index": k,
+            "opponent_id": opponent_id,
+            "winner": rt["winner"],
+            "reason": rt["reason"],
+            "trajectory_ref": ref,
+        })
+    return summaries
 
 
 def _resolve_custom_opponent(
@@ -336,26 +367,104 @@ def _resolve_custom_opponent(
     return {opponent_id: lambda: DslOpponent(dsl)}, enemy_spec
 
 
-def run_battle(req: dict[str, Any]) -> dict[str, Any]:
-    """Run a head-to-head battle and persist the representative trajectory.
+def _gauntlet_opponent_ids(
+    include_held_out: bool, include_custom: bool, notes: list[str],
+) -> list[tuple[str, dict | None, HardwareSpec | None]]:
+    """Resolve the gauntlet opponent roster as a list of
+    ``(opponent_id, extra_opponents, enemy_hw_spec)``.
 
-    ``req`` keys: ``a_model_id`` (required), exactly one of ``b_model_id`` /
-    ``b_opponent_id``, ``rounds`` (default 5), ``mult`` (default 3.0),
+    The base roster is the SEEN zoo (built-in zoo minus held-out). With
+    ``include_held_out`` the held-out opponents (feinter/orbiter) are appended.
+    With ``include_custom`` every saved custom opponent is appended (each
+    resolved to its DslOpponent factory + own hardware)."""
+    import opponents as _opp
+
+    seen = [oid for oid in _opp.OPPONENT_IDS
+            if oid not in _opp.HELD_OUT_OPPONENT_IDS]
+    roster: list[tuple[str, dict | None, HardwareSpec | None]] = [
+        (oid, None, None) for oid in seen
+    ]
+    if include_held_out:
+        roster += [(oid, None, None) for oid in _opp.HELD_OUT_OPPONENT_IDS]
+
+    if include_custom:
+        from webapp.backend import opponents_store
+        custom_notes: list[str] = []
+        for summary in opponents_store.list_opponents():
+            cid = summary["id"]
+            resolved = _resolve_custom_opponent(cid, custom_notes)
+            if resolved is not None:
+                extra, enemy_spec = resolved
+                roster.append((cid, extra, enemy_spec))
+        if custom_notes:
+            notes.append(
+                "Custom opponents fight on their own saved hardware."
+            )
+    return roster
+
+
+def _gauntlet(
+    net_a, roster: list[tuple[str, dict | None, HardwareSpec | None]],
+    rounds: int, mult: float, seed: int, a_spec: HardwareSpec | None,
+    battle_dir: Path,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Run model A against every opponent in ``roster`` for ``rounds`` rounds.
+
+    Writes each opponent's round trajectories under
+    ``<battle_dir>/<opponent_id>__r<k>.json`` and returns
+    ``(per_opponent, overall_raw)`` where ``per_opponent`` is a list of
+    ``{opponent_id, stats, rounds:[...]}`` and ``overall_raw`` is the summed
+    Counter across all opponents. Runs under the caller's PyBullet lock."""
+    per_opponent: list[dict[str, Any]] = []
+    overall = Counter()
+    for opponent_id, extra, enemy_spec in roster:
+        raw, round_trajs = _battle_vs_opponent(
+            net_a, opponent_id, rounds, mult, seed, a_spec,
+            extra_opponents=extra, enemy_hw_spec=enemy_spec,
+        )
+        # Namespace refs per-opponent so they never collide across opponents.
+        summaries = _write_rounds(
+            battle_dir, round_trajs, opponent_id,
+            prefix=f"{opponent_id}__",
+        )
+        for k in raw:
+            overall[k] += raw[k]
+        per_opponent.append({
+            "opponent_id": opponent_id,
+            "stats": _full_stats(rounds, raw),
+            "rounds": summaries,
+        })
+    return per_opponent, dict(overall)
+
+
+def run_battle(req: dict[str, Any]) -> dict[str, Any]:
+    """Run a head-to-head battle (single) or a whole-zoo gauntlet and persist
+    every round's trajectory.
+
+    ``req`` keys: ``a_model_id`` (required), ``mode`` ("single"|"gauntlet",
+    default "single"), ``rounds`` (default 5), ``mult`` (default 3.0),
     ``seed`` (default 4242), optional ``a_spec`` / ``b_spec`` HardwareSpec
     dicts.
 
-    Returns ``{battle_id, stats, trajectory, notes}``. Raises BattleError for
-    422 (bad request) / 404 (unknown model).
+    * **single** — exactly one of ``b_model_id`` / ``b_opponent_id``. Returns
+      ``{battle_id, mode:"single", stats, rounds, trajectory, notes?}`` where
+      ``rounds`` is a per-round list ``[{index, opponent_id, winner, reason,
+      trajectory_ref}]`` and ``trajectory`` is the first decisive round (for
+      back-compat).
+    * **gauntlet** — side B is ignored; A fights each built-in (seen) zoo
+      opponent. ``include_held_out`` (default false) adds feinter/orbiter;
+      ``include_custom`` (default false) adds saved custom opponents. Returns
+      ``{battle_id, mode:"gauntlet", per_opponent, overall_stats, notes?}``.
+
+    Raises BattleError for 422 (bad request) / 404 (unknown model).
     """
     a_model_id = req.get("a_model_id")
     if not a_model_id:
         raise BattleError(422, "a_model_id is required")
-    b_model_id = req.get("b_model_id")
-    b_opponent_id = req.get("b_opponent_id")
-    if bool(b_model_id) == bool(b_opponent_id):
-        raise BattleError(
-            422, "provide exactly one of b_model_id or b_opponent_id"
-        )
+
+    mode = req.get("mode", "single")
+    if mode not in ("single", "gauntlet"):
+        raise BattleError(422, f"unknown mode: {mode}")
 
     rounds = int(req.get("rounds", 5))
     if rounds < 1:
@@ -373,6 +482,27 @@ def run_battle(req: dict[str, Any]) -> dict[str, Any]:
             "b_spec was provided but per-side (B) hardware is not supported in "
             "v1: the B side runs on the default chassis. Only the A (agent) "
             "side honors a_spec."
+        )
+
+    battle_id = uuid.uuid4().hex[:12]
+    config.ensure_dirs()
+    battle_dir = config.BATTLES_DIR / battle_id
+    battle_dir.mkdir(parents=True, exist_ok=True)
+
+    if mode == "gauntlet":
+        return _run_gauntlet(
+            a_model_id, rounds, mult, seed, a_spec,
+            include_held_out=bool(req.get("include_held_out", False)),
+            include_custom=bool(req.get("include_custom", False)),
+            battle_id=battle_id, battle_dir=battle_dir, notes=notes,
+        )
+
+    # ---- single ----------------------------------------------------------
+    b_model_id = req.get("b_model_id")
+    b_opponent_id = req.get("b_opponent_id")
+    if bool(b_model_id) == bool(b_opponent_id):
+        raise BattleError(
+            422, "provide exactly one of b_model_id or b_opponent_id"
         )
 
     # Resolve a CUSTOM opponent id (vs a built-in zoo id) up front, outside the
@@ -394,29 +524,31 @@ def run_battle(req: dict[str, Any]) -> dict[str, Any]:
     with pybullet_lock:
         if b_model_id:
             net_b = _load_policy(b_model_id)
-            raw, trajectory = _battle_vs_model(
+            raw, round_trajs = _battle_vs_model(
                 net_a, net_b, rounds, mult, seed, a_spec
             )
         else:
-            raw, trajectory = _battle_vs_opponent(
+            raw, round_trajs = _battle_vs_opponent(
                 net_a, b_opponent_id, rounds, mult, seed, a_spec,
                 extra_opponents=extra_opponents,
                 enemy_hw_spec=enemy_hw_spec,
             )
 
     stats = _full_stats(rounds, raw)
+    summaries = _write_rounds(battle_dir, round_trajs, b_opponent_id)
 
-    battle_id = uuid.uuid4().hex[:12]
-    config.ensure_dirs()
-    battle_dir = config.BATTLES_DIR / battle_id
-    battle_dir.mkdir(parents=True, exist_ok=True)
+    # Back-compat: keep a top-level `trajectory` = the first decisive round.
+    rep_idx = _representative_index(round_trajs)
+    trajectory = round_trajs[rep_idx]["trajectory"]
     (battle_dir / "trajectory.json").write_text(
         json.dumps(trajectory), encoding="utf-8"
     )
 
     result: dict[str, Any] = {
         "battle_id": battle_id,
+        "mode": "single",
         "stats": stats,
+        "rounds": summaries,
         "trajectory": trajectory,
     }
     if notes:
@@ -424,12 +556,56 @@ def run_battle(req: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _run_gauntlet(
+    a_model_id: str, rounds: int, mult: float, seed: int,
+    a_spec: HardwareSpec | None, include_held_out: bool, include_custom: bool,
+    battle_id: str, battle_dir: Path, notes: list[str],
+) -> dict[str, Any]:
+    """Gauntlet entrypoint: A vs the whole (seen) zoo, one block per opponent."""
+    roster = _gauntlet_opponent_ids(include_held_out, include_custom, notes)
+    if not roster:
+        raise BattleError(422, "gauntlet roster is empty")
+
+    net_a = _load_policy(a_model_id)
+    with pybullet_lock:
+        per_opponent, overall_raw = _gauntlet(
+            net_a, roster, rounds, mult, seed, a_spec, battle_dir
+        )
+
+    total_rounds = rounds * len(roster)
+    result: dict[str, Any] = {
+        "battle_id": battle_id,
+        "mode": "gauntlet",
+        "per_opponent": per_opponent,
+        "overall_stats": _full_stats(total_rounds, overall_raw),
+    }
+    if notes:
+        result["notes"] = " ".join(notes)
+    return result
+
+
+_SAFE_REF = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
+
+
 def load_trajectory(battle_id: str) -> dict[str, Any] | None:
-    """Read a previously recorded battle trajectory, or ``None`` if missing."""
+    """Read a battle's representative trajectory (``trajectory.json``), or
+    ``None`` if missing. Back-compat for the single-trajectory route."""
+    return _read_battle_json(battle_id, "trajectory")
+
+
+def load_trajectory_ref(battle_id: str, ref: str) -> dict[str, Any] | None:
+    """Read a specific round trajectory ``<battle_id>/<ref>.json``, or ``None``
+    if missing / the ref is not a safe filename (no path traversal)."""
+    if not ref or not all(c in _SAFE_REF for c in ref):
+        return None
+    return _read_battle_json(battle_id, ref)
+
+
+def _read_battle_json(battle_id: str, ref: str) -> dict[str, Any] | None:
     # Guard against path traversal: battle ids are hex tokens.
     if not battle_id or not all(c in "0123456789abcdef" for c in battle_id):
         return None
-    path = config.BATTLES_DIR / battle_id / "trajectory.json"
+    path = config.BATTLES_DIR / battle_id / f"{ref}.json"
     if not path.exists():
         return None
     try:

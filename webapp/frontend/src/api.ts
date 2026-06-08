@@ -168,9 +168,14 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
-  // Re-read a previously recorded battle trajectory.
+  // Re-read a battle's representative (first decisive) trajectory.
   getBattleTrajectory: (battleId: string) =>
     request<Trajectory>(`/api/battle/${battleId}/trajectory`),
+
+  // Re-read a SPECIFIC round's trajectory by its trajectory_ref (single or
+  // gauntlet). `ref` is a safe filename token (validated server-side).
+  getBattleRoundTrajectory: (battleId: string, ref: string) =>
+    request<Trajectory>(`/api/battle/${battleId}/trajectory/${ref}`),
 
   // ---- Custom opponents (rule-DSL) -----------------------------------------
   listOpponents: () => request<CustomOpponentSummary[]>('/api/opponents'),
