@@ -225,25 +225,19 @@ function MiniBar({ frac, color }: { frac: number; color: string }) {
 }
 
 // ---------------------------------------------------------------------------
-// Opponent mix — renormalization
+// Opponent mix — included weights
 // ---------------------------------------------------------------------------
-// Normalize the INCLUDED opponents' raw weights so they sum to 1.0. Unchecked
-// opponents contribute nothing and are dropped from the result. If every
-// included weight is zero (or the set is empty) we fall back to an equal split
-// across the included ids so Σ stays exactly 1.00.
-function normalizedWeights(
+// Raw weights of the INCLUDED (checked) opponents — the user's exact values.
+// Unchecked opponents are dropped. These are sent as-is; the UI requires their
+// sum to equal 1.0 (weightSum / weightsValid) rather than auto-normalizing, so
+// the user keeps full control of the mix.
+function includedWeights(
   opps: Record<string, OppChoice>,
 ): Record<string, number> {
-  const included = Object.entries(opps).filter(([, c]) => c.on);
-  if (included.length === 0) return {};
-  const total = included.reduce((s, [, c]) => s + Math.max(0, c.weight), 0);
   const out: Record<string, number> = {};
-  if (total <= 0) {
-    const equal = 1 / included.length;
-    for (const [id] of included) out[id] = equal;
-    return out;
+  for (const [id, c] of Object.entries(opps)) {
+    if (c.on) out[id] = Math.max(0, c.weight);
   }
-  for (const [id, c] of included) out[id] = Math.max(0, c.weight) / total;
   return out;
 }
 
@@ -486,14 +480,19 @@ function Setup({ onStarted }: { onStarted: (jobId: string) => void }) {
     return hp;
   }, [algo, lr, gamma, netArch, nStep, tau, entCoef, clip]);
 
-  // Auto-renormalized included weights (Σ = 1.00). Sent in the POST body and
-  // surfaced live in the editor.
-  const normWeights = useMemo(() => normalizedWeights(opps), [opps]);
+  // Raw included weights (the user's exact values), sent as-is. The UI requires
+  // their sum to equal 1.00 — no auto-normalize.
+  const incWeights = useMemo(() => includedWeights(opps), [opps]);
   const includedCount = useMemo(
     () => Object.values(opps).filter((c) => c.on).length,
     [opps],
   );
   const noOpponents = includedCount === 0;
+  const weightSum = useMemo(
+    () => Object.values(incWeights).reduce((s, w) => s + w, 0),
+    [incWeights],
+  );
+  const weightsValid = !noOpponents && Math.abs(weightSum - 1) < 0.001;
 
   // Snapshot the full setup for persistence.
   const setupSnapshot = useCallback(
@@ -578,7 +577,7 @@ function Setup({ onStarted }: { onStarted: (jobId: string) => void }) {
       eval_every: evalEvery || undefined,
       start_mult: startMult,
       hyperparams,
-      opponent_weights: Object.keys(normWeights).length ? normWeights : undefined,
+      opponent_weights: Object.keys(incWeights).length ? incWeights : undefined,
       smoke: smoke || undefined,
     };
     if (sourceKind === 'robot') body.robot_id = robotId;
@@ -804,7 +803,8 @@ function Setup({ onStarted }: { onStarted: (jobId: string) => void }) {
             list={oppList}
             opps={opps}
             setOpps={setOpps}
-            normWeights={normWeights}
+            weightSum={weightSum}
+            weightsValid={weightsValid}
           />
 
           {/* Smoke toggle */}
@@ -825,6 +825,12 @@ function Setup({ onStarted }: { onStarted: (jobId: string) => void }) {
               Select at least one opponent for the training mix.
             </div>
           )}
+          {!noOpponents && !weightsValid && (
+            <div className="num" style={{ fontSize: 11, color: 'var(--warn)' }}>
+              Opponent weights must sum to 1.00 (currently {weightSum.toFixed(2)}).
+              Please adjust them so the sum is 1.
+            </div>
+          )}
           {error && (
             <div className="num" style={{ fontSize: 11, color: 'var(--loss)' }}>
               {error}
@@ -834,7 +840,9 @@ function Setup({ onStarted }: { onStarted: (jobId: string) => void }) {
           <div className="flex items-center gap-3">
             <button
               className="btn btn-primary"
-              disabled={starting || robotMissing || baseMissing || noOpponents}
+              disabled={
+                starting || robotMissing || baseMissing || noOpponents || !weightsValid
+              }
               onClick={start}
               style={{ height: 38, fontSize: 14, flex: 1 }}
             >
@@ -897,15 +905,16 @@ function OpponentEditor({
   list,
   opps,
   setOpps,
-  normWeights,
+  weightSum,
+  weightsValid,
 }: {
   list: TrainOpponent[];
   opps: Record<string, OppChoice>;
   setOpps: Dispatch<SetStateAction<Record<string, OppChoice>>>;
-  normWeights: Record<string, number>;
+  weightSum: number;
+  weightsValid: boolean;
 }) {
   const includedCount = Object.values(opps).filter((c) => c.on).length;
-  const sum = Object.values(normWeights).reduce((s, w) => s + w, 0);
 
   function toggle(id: string) {
     setOpps((prev) => {
@@ -931,13 +940,13 @@ function OpponentEditor({
         </span>
         <span
           className="num"
-          style={{ fontSize: 10, color: includedCount ? 'var(--win)' : 'var(--warn)' }}
+          style={{ fontSize: 10, color: weightsValid ? 'var(--win)' : 'var(--warn)' }}
         >
-          Σ = {sum.toFixed(2)} · {includedCount} active
+          Σ = {weightSum.toFixed(2)} · {includedCount} active
         </span>
       </div>
       <span className="num text-fg-2" style={{ fontSize: 10 }}>
-        Check opponents to include; weights auto-normalize to 1.00.
+        Check opponents to include and set each weight — they must sum to 1.00.
       </span>
       <div
         className="flex flex-col divide-y rounded border"
@@ -945,7 +954,6 @@ function OpponentEditor({
       >
         {list.map((o) => {
           const choice = opps[o.id] ?? { on: false, weight: o.default_weight };
-          const norm = normWeights[o.id];
           return (
             <div
               key={o.id}
@@ -983,19 +991,8 @@ function OpponentEditor({
                   const v = parseFloat(e.target.value);
                   if (Number.isFinite(v)) setWeight(o.id, v);
                 }}
-                style={{ width: 72, height: 28, fontSize: 11, textAlign: 'right' }}
+                style={{ width: 80, height: 28, fontSize: 11, textAlign: 'right' }}
               />
-              <span
-                className="num"
-                style={{
-                  fontSize: 11,
-                  minWidth: 42,
-                  textAlign: 'right',
-                  color: choice.on ? 'var(--cyan)' : 'var(--fg-2)',
-                }}
-              >
-                {choice.on && norm != null ? `${(norm * 100).toFixed(0)}%` : '—'}
-              </span>
             </div>
           );
         })}
