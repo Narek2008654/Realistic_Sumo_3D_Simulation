@@ -14,7 +14,7 @@
 //    the TrajectoryPlayer.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { Dispatch, SetStateAction } from 'react';
+import type { Dispatch, ReactNode, SetStateAction } from 'react';
 import { Link } from 'react-router-dom';
 import { api, ApiError } from '../api';
 import { Panel, Reveal, StatusPill } from '../components/ui';
@@ -30,7 +30,9 @@ import {
 } from '../store/trainSetup';
 import type {
   CheckpointEvent,
+  CustomOpponentSummary,
   HardwareSpec,
+  LogEvent,
   ModelCard,
   RecommendResult,
   RobotSummary,
@@ -215,6 +217,98 @@ function MetricChart({ checkpoints }: { checkpoints: CheckpointEvent[] }) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Entropy sparkline (PPO only — DQN has no policy entropy)
+// ---------------------------------------------------------------------------
+function EntropyChart({ logs }: { logs: LogEvent[] }) {
+  const W = 520;
+  const H = 140;
+  const PAD = { l: 36, r: 12, t: 14, b: 24 };
+  const iw = W - PAD.l - PAD.r;
+  const ih = H - PAD.t - PAD.b;
+  // Cap the axis at ~ln(9) ≈ 2.2 (uniform over the 9 discrete actions).
+  const TOP = 2.2;
+
+  const pts = logs
+    .filter((l) => typeof l.entropy === 'number' && Number.isFinite(l.entropy))
+    .map((l) => ({ step: l.step, ent: l.entropy as number }));
+
+  if (pts.length === 0) {
+    return (
+      <div className="flex h-[140px] items-center justify-center">
+        <span className="micro text-fg-2">NO ENTROPY YET (PPO ONLY)</span>
+      </div>
+    );
+  }
+
+  const steps = pts.map((p) => p.step);
+  const minStep = Math.min(...steps);
+  const maxStep = Math.max(...steps);
+  const spanStep = Math.max(1, maxStep - minStep);
+
+  const x = (step: number) =>
+    PAD.l + (pts.length === 1 ? iw / 2 : ((step - minStep) / spanStep) * iw);
+  const y = (v: number) => PAD.t + (1 - Math.max(0, Math.min(1, v / TOP))) * ih;
+
+  const path = pts
+    .map((p, i) => `${i === 0 ? 'M' : 'L'}${x(p.step)},${y(p.ent)}`)
+    .join(' ');
+  const grid = [0, 0.5, 1, 1.5, 2];
+
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ maxHeight: 160 }}>
+      {grid.map((g) => (
+        <g key={g}>
+          <line
+            x1={PAD.l}
+            x2={W - PAD.r}
+            y1={y(g)}
+            y2={y(g)}
+            stroke="var(--line)"
+            strokeWidth={0.5}
+          />
+          <text
+            x={PAD.l - 6}
+            y={y(g) + 3}
+            textAnchor="end"
+            fill="var(--fg-2)"
+            fontSize={8}
+            fontFamily="'IBM Plex Mono', monospace"
+          >
+            {g.toFixed(1)}
+          </text>
+        </g>
+      ))}
+
+      <path d={path} fill="none" stroke="var(--cyan)" strokeWidth={1.8} />
+      {pts.length <= 80 &&
+        pts.map((p) => (
+          <circle key={p.step} cx={x(p.step)} cy={y(p.ent)} r={2} fill="var(--cyan)" />
+        ))}
+
+      <text
+        x={PAD.l}
+        y={H - 8}
+        fill="var(--fg-2)"
+        fontSize={8}
+        fontFamily="'IBM Plex Mono', monospace"
+      >
+        {minStep.toLocaleString()}
+      </text>
+      <text
+        x={W - PAD.r}
+        y={H - 8}
+        textAnchor="end"
+        fill="var(--fg-2)"
+        fontSize={8}
+        fontFamily="'IBM Plex Mono', monospace"
+      >
+        {maxStep.toLocaleString()}
+      </text>
+    </svg>
+  );
+}
+
 function MiniBar({ frac, color }: { frac: number; color: string }) {
   const pct = Math.max(0, Math.min(1, frac));
   return (
@@ -330,6 +424,9 @@ function Setup({ onStarted }: { onStarted: (jobId: string) => void }) {
   // Opponent mix: id -> {on, weight}. Seeded from /api/train/opponents (held-out
   // unchecked) once loaded, then merged with any saved choices.
   const [oppList, setOppList] = useState<TrainOpponent[]>([]);
+  // User-authored custom opponents (DSL). Listed under a CUSTOM group; default
+  // UNCHECKED so the mix is unchanged unless explicitly opted in.
+  const [customList, setCustomList] = useState<CustomOpponentSummary[]>([]);
   const [opps, setOpps] = useState<Record<string, OppChoice>>(saved?.opponents ?? {});
 
   const [starting, setStarting] = useState(false);
@@ -351,23 +448,30 @@ function Setup({ onStarted }: { onStarted: (jobId: string) => void }) {
   // with their default_weight; show held-out (feinter/orbiter) UNCHECKED. Merge
   // saved choices on top so a restored setup wins.
   useEffect(() => {
-    api
-      .trainOpponents()
-      .then(({ opponents }) => {
-        setOppList(opponents);
-        setOpps((prev) => {
-          const next: Record<string, OppChoice> = {};
-          for (const o of opponents) {
-            const savedChoice = saved?.opponents?.[o.id] ?? prev[o.id];
-            next[o.id] = savedChoice ?? {
-              on: !o.held_out,
-              weight: o.default_weight > 0 ? o.default_weight : 1 / opponents.length,
-            };
-          }
-          return next;
-        });
-      })
-      .catch(() => {});
+    Promise.all([
+      api.trainOpponents().then(({ opponents }) => opponents).catch(() => []),
+      api.listOpponents().catch(() => []),
+    ]).then(([opponents, custom]) => {
+      setOppList(opponents);
+      setCustomList(custom);
+      setOpps((prev) => {
+        const next: Record<string, OppChoice> = {};
+        for (const o of opponents) {
+          const savedChoice = saved?.opponents?.[o.id] ?? prev[o.id];
+          next[o.id] = savedChoice ?? {
+            on: !o.held_out,
+            weight: o.default_weight > 0 ? o.default_weight : 1 / opponents.length,
+          };
+        }
+        // Custom opponents: default UNCHECKED with a 0 weight, but keep any
+        // saved/restored choice so an opted-in custom mix survives a reload.
+        for (const c of custom) {
+          const savedChoice = saved?.opponents?.[c.id] ?? prev[c.id];
+          next[c.id] = savedChoice ?? { on: false, weight: 0 };
+        }
+        return next;
+      });
+    });
     // saved is stable (module-eval ref); run once.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -801,6 +905,7 @@ function Setup({ onStarted }: { onStarted: (jobId: string) => void }) {
           {/* Opponent mix editor */}
           <OpponentEditor
             list={oppList}
+            customList={customList}
             opps={opps}
             setOpps={setOpps}
             weightSum={weightSum}
@@ -903,12 +1008,14 @@ function Setup({ onStarted }: { onStarted: (jobId: string) => void }) {
 // every include/weight change so the included set always sums to 1.00.
 function OpponentEditor({
   list,
+  customList,
   opps,
   setOpps,
   weightSum,
   weightsValid,
 }: {
   list: TrainOpponent[];
+  customList: CustomOpponentSummary[];
   opps: Record<string, OppChoice>;
   setOpps: Dispatch<SetStateAction<Record<string, OppChoice>>>;
   weightSum: number;
@@ -921,7 +1028,11 @@ function OpponentEditor({
       const cur = prev[id] ?? { on: false, weight: 0 };
       // Guard: never let the last included opponent be unchecked.
       if (cur.on && includedCount <= 1) return prev;
-      return { ...prev, [id]: { ...cur, on: !cur.on } };
+      // When opting a custom opponent in for the first time, give it a small
+      // starting weight so it isn't a no-op zero (the user still tunes Σ to 1).
+      const turningOn = !cur.on;
+      const weight = turningOn && cur.weight <= 0 ? 0.1 : cur.weight;
+      return { ...prev, [id]: { on: turningOn, weight } };
     });
   }
 
@@ -931,6 +1042,44 @@ function OpponentEditor({
       return { ...prev, [id]: { ...cur, weight: Math.max(0, weight) } };
     });
   }
+
+  const row = (
+    id: string,
+    label: ReactNode,
+    fallbackWeight: number,
+  ) => {
+    const choice = opps[id] ?? { on: false, weight: fallbackWeight };
+    return (
+      <div
+        key={id}
+        className="flex items-center gap-3 px-3 py-2"
+        style={{ borderColor: 'var(--line)', opacity: choice.on ? 1 : 0.55 }}
+      >
+        <input
+          type="checkbox"
+          checked={choice.on}
+          onChange={() => toggle(id)}
+          style={{ accentColor: 'var(--accent)' }}
+        />
+        <span className="num text-fg-1" style={{ fontSize: 12, minWidth: 84, flex: 1 }}>
+          {label}
+        </span>
+        <input
+          type="number"
+          className="ctl num"
+          value={choice.weight}
+          min={0}
+          step={0.05}
+          disabled={!choice.on}
+          onChange={(e) => {
+            const v = parseFloat(e.target.value);
+            if (Number.isFinite(v)) setWeight(id, v);
+          }}
+          style={{ width: 80, height: 28, fontSize: 11, textAlign: 'right' }}
+        />
+      </div>
+    );
+  };
 
   return (
     <div className="flex flex-col gap-2">
@@ -952,51 +1101,47 @@ function OpponentEditor({
         className="flex flex-col divide-y rounded border"
         style={{ borderColor: 'var(--line)' }}
       >
-        {list.map((o) => {
-          const choice = opps[o.id] ?? { on: false, weight: o.default_weight };
-          return (
-            <div
-              key={o.id}
-              className="flex items-center gap-3 px-3 py-2"
-              style={{
-                borderColor: 'var(--line)',
-                opacity: choice.on ? 1 : 0.55,
-              }}
-            >
-              <input
-                type="checkbox"
-                checked={choice.on}
-                onChange={() => toggle(o.id)}
-                style={{ accentColor: 'var(--accent)' }}
-              />
-              <span
-                className="num text-fg-1"
-                style={{ fontSize: 12, minWidth: 84, flex: 1 }}
-              >
-                {o.id}
-                {o.held_out && (
-                  <span className="micro" style={{ fontSize: 8, color: 'var(--cyan)' }}>
-                    {' '}· EVAL-ONLY
-                  </span>
-                )}
-              </span>
-              <input
-                type="number"
-                className="ctl num"
-                value={choice.weight}
-                min={0}
-                step={0.05}
-                disabled={!choice.on}
-                onChange={(e) => {
-                  const v = parseFloat(e.target.value);
-                  if (Number.isFinite(v)) setWeight(o.id, v);
-                }}
-                style={{ width: 80, height: 28, fontSize: 11, textAlign: 'right' }}
-              />
-            </div>
-          );
-        })}
+        {list.map((o) =>
+          row(
+            o.id,
+            <>
+              {o.id}
+              {o.held_out && (
+                <span className="micro" style={{ fontSize: 8, color: 'var(--cyan)' }}>
+                  {' '}· EVAL-ONLY
+                </span>
+              )}
+            </>,
+            o.default_weight,
+          ),
+        )}
       </div>
+
+      {/* Custom (user-authored DSL) opponents — default unchecked. */}
+      {customList.length > 0 && (
+        <>
+          <span className="micro text-fg-2" style={{ fontSize: 9, marginTop: 4 }}>
+            CUSTOM · DSL behavior on the standard enemy chassis
+          </span>
+          <div
+            className="flex flex-col divide-y rounded border"
+            style={{ borderColor: 'var(--line)' }}
+          >
+            {customList.map((c) =>
+              row(
+                c.id,
+                <>
+                  {c.name}
+                  <span className="micro" style={{ fontSize: 8, color: 'var(--accent)' }}>
+                    {' '}· CUSTOM
+                  </span>
+                </>,
+                0,
+              ),
+            )}
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -1051,6 +1196,16 @@ function Dashboard({
       (status?.events.filter((e) => e.t === 'checkpoint') ??
         []) as unknown as CheckpointEvent[],
     [status],
+  );
+  const logs = useMemo(
+    () =>
+      (status?.events.filter((e) => e.t === 'log') ??
+        []) as unknown as LogEvent[],
+    [status],
+  );
+  const hasEntropy = useMemo(
+    () => logs.some((l) => typeof l.entropy === 'number'),
+    [logs],
   );
   const latest = status?.latest_checkpoint ?? null;
 
@@ -1228,6 +1383,20 @@ function Dashboard({
           />
         </Reveal>
       </div>
+
+      {/* Policy entropy (PPO) — its own series across the log cadence. */}
+      {hasEntropy && (
+        <Reveal index={4}>
+          <Panel title="Policy Entropy · per log" live ticks bodyClassName="p-4">
+            <EntropyChart logs={logs} />
+            <div className="mt-2 flex gap-4">
+              <span className="micro num" style={{ fontSize: 9, color: 'var(--cyan)' }}>
+                ── ENTROPY (nats · 0 collapsed → ~2.2 uniform)
+              </span>
+            </div>
+          </Panel>
+        </Reveal>
+      )}
 
       {/* Per-opponent + timeline */}
       <div className="grid grid-cols-1 gap-5 xl:grid-cols-2">

@@ -270,6 +270,16 @@ export interface CheckpointEvent {
   trajectory: string;
 }
 
+/** Lightweight per-log-cadence telemetry the trainer appends to
+ *  progress.jsonl. `entropy` is present for PPO only (DQN omits it). */
+export interface LogEvent {
+  t: 'log';
+  step: number;
+  entropy?: number;
+  fps?: number;
+  wr?: number;
+}
+
 export interface TrainEvent {
   t: string;
   step?: number;

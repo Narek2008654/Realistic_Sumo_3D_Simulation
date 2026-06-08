@@ -196,6 +196,11 @@ EVAL_EVERY = 100_000
 # to today. ``_HW_SPEC`` flows into build_env so the job's robot is used.
 _RUN_CFG = None
 _HW_SPEC = None
+# Custom-opponent factories ({id: () -> DslOpponent}) built from the job
+# config's ``custom_opponents``; threaded into online_finetune's build_env as
+# ``extra_opponents`` so custom ids in ``opponent_weights`` get sampled. None
+# on the unset path (default training is byte-identical).
+_EXTRA_OPPONENTS = None
 
 HERE = HERE_TOP
 OUTPUT_DIR = HERE / "checkpoints" / "dqn_intermediate"
@@ -628,6 +633,48 @@ def offline_pretrain(
 # ---------------------------------------------------------------------------
 # Online fine-tune (epsilon-greedy + n-step replay + Double DQN)
 # ---------------------------------------------------------------------------
+def _build_extra_opponents(custom_opponents):
+    """Build ``{id: () -> DslOpponent}`` factories from a job config's
+    ``custom_opponents`` (each ``{id, behavior_dsl, hardware_spec?}``).
+
+    Returns None when there are none so build_env's ``extra_opponents`` stays
+    unset (byte-identical default path). The DSL is interpreted purely (no
+    eval/exec) by :class:`DslOpponent`. v1: the custom opponent's DSL behavior
+    runs on the STANDARD enemy chassis during training; its saved hardware_spec
+    is not threaded per-episode here (see the module-level note).
+    """
+    if not custom_opponents:
+        return None
+    from opponents.dsl_runtime import DslOpponent
+    from webapp.shared.opponent_dsl import OpponentDSL
+
+    extra = {}
+    for c in custom_opponents:
+        dsl = OpponentDSL.from_dict(c["behavior_dsl"])
+        extra[c["id"]] = (lambda d=dsl: DslOpponent(d))
+    return extra
+
+
+def _append_progress_log(job_dir, **fields):
+    """Atomically append one ``{"t":"log", ...}`` line to ``progress.jsonl``.
+
+    Used at the trainer's existing log cadence to surface a per-log fps /
+    win-rate series to the dashboard (DQN has no entropy, so it is omitted).
+    Best-effort: never raises into the training loop.
+    """
+    if not job_dir:
+        return
+    try:
+        import json as _json
+        path = Path(job_dir) / "progress.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        event = {"t": "log", **fields}
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(_json.dumps(event) + "\n")
+    except Exception as exc:  # never break training on a telemetry write
+        print(f"  [progress] log append failed (ignored): {exc!r}", flush=True)
+
+
 def online_finetune(
     online: DuelingQNet,
     target: DuelingQNet,
@@ -662,7 +709,10 @@ def online_finetune(
         sensor_hard_dr=False,
         opponent_weights=opponent_weights,
         # E1f: a job spec overrides the robot; None keeps the default env.
+        # Custom opponents (DSL) referenced by opponent_weights are passed as
+        # extra factories so they get sampled during the online phase.
         **({"hardware_spec": _HW_SPEC} if _HW_SPEC is not None else {}),
+        **({"extra_opponents": _EXTRA_OPPONENTS} if _EXTRA_OPPONENTS else {}),
     )
     buffer = NStepReplayBuffer(REPLAY_CAPACITY, GAMMA, N_STEP)
     opt = torch.optim.Adam(online.parameters(), lr=ONLINE_LR)
@@ -805,6 +855,13 @@ def online_finetune(
                     o_wr = sum(outs) / max(1, len(outs))
                     opp_strs.append(f"{o_id}={o_wr:.0%}({len(outs)})")
                 fps = (step - phase_start) / max(1e-6, time.time() - t_phase_start)
+                # E1f: surface fps / win-rate to the dashboard at the existing
+                # log cadence (DQN has no entropy -> omitted). Inert unless a
+                # job config is active (SUMO_RUN_CONFIG set).
+                if _RUN_CFG is not None:
+                    _append_progress_log(
+                        _RUN_CFG.job_dir, step=step, fps=fps, wr=wr,
+                    )
                 print(
                     f"step {step:7d}  ep={episodes:5d}  "
                     f"wr({len(recent_outcomes)})={wr:.2%}  "
@@ -837,7 +894,7 @@ def main() -> None:
     # load the job config and override the module constants the job controls.
     _rc = os.environ.get("SUMO_RUN_CONFIG")
     if _rc:
-        global _RUN_CFG, _HW_SPEC, EVAL_EVERY
+        global _RUN_CFG, _HW_SPEC, EVAL_EVERY, _EXTRA_OPPONENTS
         global ONLINE_TIMESTEPS_PER_PHASE, FINETUNE_PHASES
         global BEST_PATH, FINAL_PATH, RESUME_CHECKPOINT_PATH, CONTINUE_TRAINING
         global CONTINUE_BEST_PATH, CONTINUE_FINAL_PATH
@@ -848,6 +905,7 @@ def main() -> None:
         _RUN_CFG = cfg
         _HW_SPEC = cfg.hardware_spec
         EVAL_EVERY = cfg.eval_every
+        _EXTRA_OPPONENTS = _build_extra_opponents(cfg.custom_opponents)
         cfg.eval_every = cfg.eval_every  # (kept on cfg for the hook)
 
         # Hyperparam overrides from the job config. Each key maps onto its

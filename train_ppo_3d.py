@@ -86,6 +86,10 @@ EVAL_EVERY = 100_000
 # iff SUMO_RUN_CONFIG is set; when None the seam is a strict no-op.
 _RUN_CFG = None
 _HW_SPEC = None
+# Custom-opponent factories ({id: () -> DslOpponent}) built from the job
+# config's ``custom_opponents``; passed into build_env as ``extra_opponents``
+# so custom ids in ``opponent_weights`` get sampled. None on the unset path.
+_EXTRA_OPPONENTS = None
 
 # Human-in-the-loop: every WATCH_EVERY steps, pop a GUI window playing the
 # CURRENT policy at the current curriculum mult (non-blocking — training
@@ -244,6 +248,55 @@ def launch_watch(net: "ActorCritic", mult: float):
 
 
 # ---------------------------------------------------------------------------
+# E1f: custom opponents + progress log (only used when a job config is active)
+# ---------------------------------------------------------------------------
+def _build_extra_opponents(custom_opponents):
+    """Build ``{id: () -> DslOpponent}`` factories from a job config's
+    ``custom_opponents`` (each ``{id, behavior_dsl, hardware_spec?}``).
+
+    Returns None when there are no custom opponents so build_env's
+    ``extra_opponents`` stays unset (byte-identical default path). The DSL is
+    interpreted purely (no eval/exec) by :class:`DslOpponent`. v1: the custom
+    opponent's DSL behavior runs on the STANDARD enemy chassis during training;
+    its saved hardware_spec is not threaded per-episode here (see module note).
+    """
+    if not custom_opponents:
+        return None
+    from opponents.dsl_runtime import DslOpponent
+    from webapp.shared.opponent_dsl import OpponentDSL
+
+    extra = {}
+    for c in custom_opponents:
+        dsl = OpponentDSL.from_dict(c["behavior_dsl"])
+        # Bind dsl per-iteration via a default arg so each factory closes over
+        # its OWN opponent (a bare closure would capture the loop variable).
+        extra[c["id"]] = (lambda d=dsl: DslOpponent(d))
+    return extra
+
+
+def _append_progress_log(job_dir, **fields):
+    """Atomically append one ``{"t":"log", ...}`` line to ``progress.jsonl``.
+
+    Used at the trainer's existing log cadence to surface a per-log entropy /
+    fps / win-rate series to the dashboard (the checkpoint hook only fires on
+    the slower eval cadence). Best-effort: never raises into the training loop.
+    """
+    if not job_dir:
+        return
+    try:
+        import json as _json
+        path = pathlib.Path(job_dir) / "progress.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        event = {"t": "log", **fields}
+        # Single write() of one '\n'-terminated line: append mode on a small
+        # line is atomic enough that a concurrent reader never sees a torn line.
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(_json.dumps(event) + "\n")
+    except Exception as exc:  # never break training on a telemetry write
+        print(f"  [progress] log append failed (ignored): {exc!r}", flush=True)
+
+
+# ---------------------------------------------------------------------------
 # Training
 # ---------------------------------------------------------------------------
 def train():
@@ -258,7 +311,7 @@ def train():
     _opp_weights = None
     if _rc:
         global _RUN_CFG, _HW_SPEC, EVAL_EVERY, TOTAL_STEPS, MULT_PHASES
-        global BEST_PATH, FINAL_PATH, RESUME
+        global BEST_PATH, FINAL_PATH, RESUME, _EXTRA_OPPONENTS
         global LR, GAMMA, ENT_COEF, CLIP, NET_ARCH
         from webapp.shared import run_config, checkpoint_hook as _ch
         globals()["checkpoint_hook"] = _ch
@@ -267,6 +320,7 @@ def train():
         _HW_SPEC = cfg.hardware_spec
         EVAL_EVERY = cfg.eval_every
         _opp_weights = cfg.opponent_weights
+        _EXTRA_OPPONENTS = _build_extra_opponents(cfg.custom_opponents)
 
         # Hyperparam overrides from the job config. Each key maps onto its
         # matching module constant; absent keys leave the default untouched.
@@ -345,9 +399,12 @@ def train():
         opponent_dr=ROBUST, enemy_chassis_dr=ROBUST,
         mult_dr_range=ROBUST_MULT_RANGE if ROBUST else None,
         # E1f: a job config overrides the opponent mix / robot; both default
-        # to None so the unset path is byte-identical.
+        # to None so the unset path is byte-identical. Custom opponents (DSL)
+        # referenced by opponent_weights are passed as extra factories so they
+        # get sampled during training.
         **({"opponent_weights": _opp_weights} if _opp_weights else {}),
         **({"hardware_spec": _HW_SPEC} if _HW_SPEC is not None else {}),
+        **({"extra_opponents": _EXTRA_OPPONENTS} if _EXTRA_OPPONENTS else {}),
     )
 
     net = ActorCritic(NET_OBS_DIM, N_ACTIONS, hidden=NET_ARCH)
@@ -516,6 +573,13 @@ def train():
                 )
             fps = step / max(1e-6, time.time() - t0)
             phase_tag = " [warmup]" if update_idx <= CRITIC_WARMUP_UPDATES else ""
+            # E1f: surface the live entropy / fps / win-rate to the dashboard
+            # at the existing log cadence (inert unless a job config is active).
+            if _RUN_CFG is not None:
+                _append_progress_log(
+                    _RUN_CFG.job_dir, step=step,
+                    entropy=last_entropy, fps=fps, wr=wr,
+                )
             print(f"step {step:7d}  ep={episodes:5d}  wr({len(recent)})={wr:.2%}  "
                   f"ent={last_entropy:.3f}  kl={last_kl:.4f}  "
                   f"fps={fps:.1f}{phase_tag}{marker}", flush=True)

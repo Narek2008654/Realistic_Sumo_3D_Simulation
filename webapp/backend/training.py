@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
-from webapp.backend import config, registry, robots_store
+from webapp.backend import config, opponents_store, registry, robots_store
 from webapp.shared.hardware_spec import HardwareSpec
 from webapp.shared.run_config import TrainingConfig
 
@@ -145,6 +145,47 @@ def _resolve_resume_path(base_model_id: str) -> str:
     return str(pt)
 
 
+def _resolve_custom_opponents(
+    opponent_weights: Optional[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Resolve the custom (non-zoo) ids in ``opponent_weights`` to their saved
+    records, returning ``[{id, behavior_dsl, hardware_spec}, ...]``.
+
+    A built-in zoo id is left for the trainer to sample normally. Any id that
+    is neither a built-in nor a saved custom opponent raises :class:`JobError`
+    (400). Zero-weight custom ids are skipped (they'd never be sampled and
+    don't need a factory). Returns ``[]`` when there are no custom opponents,
+    so the unset/zoo-only path is byte-identical.
+    """
+    if not opponent_weights:
+        return []
+    # Lazy import: the zoo registry pulls sumo_env, so keep it off module load.
+    from opponents import OPPONENT_REGISTRY
+
+    out: list[dict[str, Any]] = []
+    for opp_id, weight in opponent_weights.items():
+        if opp_id in OPPONENT_REGISTRY:
+            continue  # built-in zoo opponent — the trainer samples it directly
+        record = opponents_store.get_opponent(opp_id)
+        if record is None:
+            raise JobError(
+                f"unknown opponent id in opponent_weights: {opp_id!r} "
+                f"(not a built-in zoo opponent nor a saved custom opponent)"
+            )
+        try:
+            w = float(weight)
+        except (TypeError, ValueError):
+            w = 0.0
+        if w <= 0.0:
+            continue  # never sampled — no factory needed
+        out.append({
+            "id": record["id"],
+            "behavior_dsl": record["behavior_dsl"],
+            "hardware_spec": record.get("hardware_spec"),
+        })
+    return out
+
+
 def _build_config(req: dict[str, Any], job_dir: Path) -> TrainingConfig:
     """Translate an API request into a :class:`TrainingConfig`.
 
@@ -180,6 +221,12 @@ def _build_config(req: dict[str, Any], job_dir: Path) -> TrainingConfig:
     if opponent_weights is not None and not isinstance(opponent_weights, dict):
         raise JobError("opponent_weights must be an object or null")
 
+    # Resolve any opponent ids in the mix that are NOT built-in zoo ids: they
+    # must be saved custom opponents, whose DSL+spec we thread into the run
+    # config so the trainer can sample them (via extra_opponents). An id that
+    # is neither a zoo id nor a saved opponent is a 400.
+    custom_opponents = _resolve_custom_opponents(opponent_weights)
+
     start_mult = req.get("start_mult")
     if start_mult is not None:
         try:
@@ -206,6 +253,7 @@ def _build_config(req: dict[str, Any], job_dir: Path) -> TrainingConfig:
         seed=int(req.get("seed") or 42),
         start_mult=start_mult,
         hyperparams=dict(hyperparams),
+        custom_opponents=custom_opponents,
     )
 
 
