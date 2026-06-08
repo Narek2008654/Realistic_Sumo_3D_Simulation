@@ -4,10 +4,15 @@
 import type {
   BattleBody,
   BattleResult,
+  CreateOpponentBody,
+  CustomOpponent,
+  CustomOpponentSummary,
   EvalMode,
   Geometry,
   HardwareSpec,
   ModelCard,
+  OpponentDsl,
+  OpponentValidateResult,
   RecommendResult,
   RobotRecord,
   RobotSummary,
@@ -166,4 +171,28 @@ export const api = {
   // Re-read a previously recorded battle trajectory.
   getBattleTrajectory: (battleId: string) =>
     request<Trajectory>(`/api/battle/${battleId}/trajectory`),
+
+  // ---- Custom opponents (rule-DSL) -----------------------------------------
+  listOpponents: () => request<CustomOpponentSummary[]>('/api/opponents'),
+
+  getOpponent: (id: string) =>
+    request<CustomOpponent>(`/api/opponents/${id}`),
+
+  createOpponent: (body: CreateOpponentBody) =>
+    request<CustomOpponent>('/api/opponents', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  deleteOpponent: (id: string) =>
+    request<{ deleted: boolean }>(`/api/opponents/${id}`, {
+      method: 'DELETE',
+    }),
+
+  // Validate a behavior DSL without saving. Returns { ok, errors }.
+  validateOpponentDsl: (dsl: OpponentDsl) =>
+    request<OpponentValidateResult>('/api/opponents/validate', {
+      method: 'POST',
+      body: JSON.stringify({ behavior_dsl: dsl }),
+    }),
 };

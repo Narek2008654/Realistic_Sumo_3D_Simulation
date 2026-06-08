@@ -25,6 +25,7 @@ import type {
   BattleBody,
   BattleResult,
   BattleStats,
+  CustomOpponentSummary,
   HardwareSpec,
   ModelCard,
   TrainOpponent,
@@ -242,6 +243,7 @@ export default function Arena() {
   // Pickers
   const [models, setModels] = useState<ModelCard[]>([]);
   const [opponents, setOpponents] = useState<TrainOpponent[]>([]);
+  const [customOpponents, setCustomOpponents] = useState<CustomOpponentSummary[]>([]);
   const [aModelId, setAModelId] = useState('');
   const [bKind, setBKind] = useState<SideBKind>('opponent');
   const [bOpponentId, setBOpponentId] = useState('dodger');
@@ -279,6 +281,12 @@ export default function Arena() {
         setOpponents(opps);
         setBOpponentId((cur) => (opps.some((o) => o.id === cur) ? cur : opps[0]?.id ?? ''));
       })
+      .catch(() => {});
+    // Custom rule-DSL opponents (authored on /opponents) are also selectable as
+    // side B — the backend resolves a custom id passed as b_opponent_id.
+    api
+      .listOpponents()
+      .then(setCustomOpponents)
       .catch(() => {});
     api
       .hardwareDefault()
@@ -390,13 +398,26 @@ export default function Arena() {
                 onChange={(e) => setBOpponentId(e.target.value)}
                 style={{ fontSize: 12 }}
               >
-                {opponents.length === 0 && <option value="">— no opponents —</option>}
-                {opponents.map((o) => (
-                  <option key={o.id} value={o.id}>
-                    {o.id}
-                    {o.held_out ? ' · eval-only' : ''}
-                  </option>
-                ))}
+                {opponents.length === 0 && customOpponents.length === 0 && (
+                  <option value="">— no opponents —</option>
+                )}
+                <optgroup label="ZOO">
+                  {opponents.map((o) => (
+                    <option key={o.id} value={o.id}>
+                      {o.id}
+                      {o.held_out ? ' · eval-only' : ''}
+                    </option>
+                  ))}
+                </optgroup>
+                {customOpponents.length > 0 && (
+                  <optgroup label="CUSTOM">
+                    {customOpponents.map((o) => (
+                      <option key={o.id} value={o.id}>
+                        {o.name} · custom
+                      </option>
+                    ))}
+                  </optgroup>
+                )}
               </select>
             ) : bModelOptions.length === 0 ? (
               <span className="num" style={{ fontSize: 11, color: 'var(--warn)' }}>

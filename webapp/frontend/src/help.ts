@@ -157,6 +157,80 @@ export const HELP: Record<string, HelpTopic> = {
     body: 'Already-trained models whose observation/action sizes match this robot. You can start from one of these and fine-tune instead of training from scratch — a big time saver.',
   },
 
+  // --- Opponent rule-DSL: concepts -----------------------------------------
+  opp_rules: {
+    title: 'Behavior rules',
+    body: 'An ordered list of IF→THEN rules. Each tick the robot checks them top to bottom and runs the FIRST rule whose condition is true. If none match, the DEFAULT action runs.',
+  },
+  opp_default: {
+    title: 'Default action',
+    body: 'What the robot does when no rule above it matches this tick. A spinning search (spin_left/right) is a common default so it keeps hunting for the enemy.',
+  },
+  opp_when: {
+    title: 'Condition (WHEN)',
+    body: 'The trigger for a rule. Pick a sensor predicate, optionally combine several with ALL (every one true) or ANY (at least one true), and a NOT toggle to invert it.',
+  },
+  opp_combine: {
+    title: 'Combine: ALL / ANY',
+    body: 'ALL fires only when every chosen predicate is true at once. ANY fires when at least one is true. With a single predicate this does not matter.',
+  },
+  opp_not: {
+    title: 'NOT (invert)',
+    body: 'Flips the whole condition: the rule fires when the condition is FALSE instead of true. E.g. NOT front_hit = "the front sensor does NOT see the enemy".',
+  },
+  opp_timer: {
+    title: 'Timer (every N)',
+    body: 'Fires once every N control ticks regardless of sensors — useful for a periodic twitch or to break out of a stalemate. N is a whole number of ticks (about 50 ticks ≈ 1 second).',
+  },
+
+  // --- Opponent rule-DSL: predicates ---------------------------------------
+  pred_front_hit: {
+    title: 'front_hit',
+    body: "The front-center sensor beam sees the enemy straight ahead — your cue to charge.",
+  },
+  pred_left_hit: {
+    title: 'left_hit',
+    body: 'The front-LEFT sensor beam sees the enemy, i.e. it is off to your front-left.',
+  },
+  pred_right_hit: {
+    title: 'right_hit',
+    body: 'The front-RIGHT sensor beam sees the enemy, i.e. it is off to your front-right.',
+  },
+  pred_side_left_hit: {
+    title: 'side_left_hit',
+    body: 'The LEFT side sensor sees the enemy beside you on the left.',
+  },
+  pred_side_right_hit: {
+    title: 'side_right_hit',
+    body: 'The RIGHT side sensor sees the enemy beside you on the right.',
+  },
+  pred_edge_left: {
+    title: 'edge_left',
+    body: 'The left line sensor is over the white border — your left wheel is near the edge, back off that way before you fall out.',
+  },
+  pred_edge_right: {
+    title: 'edge_right',
+    body: 'The right line sensor is over the white border — your right wheel is near the edge.',
+  },
+  pred_no_target: {
+    title: 'no_target',
+    body: 'None of the sensors see the enemy. You have lost it — usually time to spin and search.',
+  },
+
+  // --- Opponent rule-DSL: actions ------------------------------------------
+  act_forward: { title: 'forward', body: 'Drive straight ahead at full speed (both wheels forward).' },
+  act_reverse: { title: 'reverse', body: 'Back straight up (both wheels reverse) — good to retreat from the edge.' },
+  act_spin_left: { title: 'spin_left', body: 'Rotate in place counter-clockwise (left). Used to search or to face the enemy.' },
+  act_spin_right: { title: 'spin_right', body: 'Rotate in place clockwise (right). Used to search or to face the enemy.' },
+  act_arc_left: { title: 'arc_left', body: 'Curve forward and to the left (left wheel slower) — chase an enemy off to your left.' },
+  act_arc_right: { title: 'arc_right', body: 'Curve forward and to the right (right wheel slower) — chase an enemy off to your right.' },
+  act_stop: { title: 'stop', body: 'Hold still (both wheels stopped).' },
+
+  opp_hardware: {
+    title: 'Opponent hardware',
+    body: 'Recorded for the design, but in v1 a custom opponent fights on the standard enemy chassis — only its behavior rules drive what it does. The saved spec is kept for later.',
+  },
+
   // --- Interview step intros (one sentence each) ---------------------------
   step_body: {
     title: 'Robot body',

@@ -1,9 +1,9 @@
 import { Navigate, Route, Routes } from 'react-router-dom';
 import { AppShell } from './components/AppShell';
 import Arena from './pages/Arena';
-import ComingSoon from './pages/ComingSoon';
 import Hardware from './pages/Hardware';
 import Models from './pages/Models';
+import Opponents from './pages/Opponents';
 import Robots from './pages/Robots';
 import Train from './pages/Train';
 
@@ -17,15 +17,7 @@ export default function App() {
         <Route path="/models" element={<Models />} />
         <Route path="/train" element={<Train />} />
         <Route path="/arena" element={<Arena />} />
-        <Route
-          path="/opponents"
-          element={
-            <ComingSoon
-              section="Opponents"
-              blurb="Build rule-DSL opponents and bind them to a hardware spec — dodger, spinner, rammer, wedger and friends, ready to drop into the arena."
-            />
-          }
-        />
+        <Route path="/opponents" element={<Opponents />} />
         <Route path="*" element={<Navigate to="/hardware" replace />} />
       </Routes>
     </AppShell>

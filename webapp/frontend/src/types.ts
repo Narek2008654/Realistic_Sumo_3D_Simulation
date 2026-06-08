@@ -302,6 +302,78 @@ export interface TrainJobSummary {
   running: boolean;
 }
 
+// ---- Custom opponents (rule-DSL) --------------------------------------------
+
+/** The fixed action vocabulary (maps to bounded wheel commands on the backend). */
+export type OpponentAction =
+  | 'forward'
+  | 'reverse'
+  | 'spin_left'
+  | 'spin_right'
+  | 'arc_left'
+  | 'arc_right'
+  | 'stop';
+
+/** The fixed predicate vocabulary (pure booleans over the sensor inputs). */
+export type OpponentPredicate =
+  | 'front_hit'
+  | 'left_hit'
+  | 'right_hit'
+  | 'side_left_hit'
+  | 'side_right_hit'
+  | 'edge_left'
+  | 'edge_right'
+  | 'no_target';
+
+/**
+ * A condition node. The backend accepts a bare predicate name, a single-key
+ * combinator dict (`all`/`any` over a list, `not` over one, `timer {every:N}`),
+ * recursively. The builder UI emits a pragmatic subset of this tree.
+ */
+export type OpponentCond =
+  | OpponentPredicate
+  | { all: OpponentCond[] }
+  | { any: OpponentCond[] }
+  | { not: OpponentCond }
+  | { timer: { every: number } };
+
+export interface OpponentRule {
+  when: OpponentCond;
+  do: OpponentAction;
+}
+
+export interface OpponentDsl {
+  rules: OpponentRule[];
+  default: OpponentAction;
+}
+
+/** Summary row from GET /api/opponents. `n_rules` is derived client-side. */
+export interface CustomOpponentSummary {
+  id: string;
+  name: string;
+  created_at: string;
+}
+
+/** Full record from GET /api/opponents/{id} (and POST /api/opponents). */
+export interface CustomOpponent extends CustomOpponentSummary {
+  hardware_spec: HardwareSpec;
+  behavior_dsl: OpponentDsl;
+  notes?: string;
+}
+
+/** Body for POST /api/opponents. */
+export interface CreateOpponentBody {
+  name: string;
+  hardware_spec: HardwareSpec;
+  behavior_dsl: OpponentDsl;
+}
+
+/** Result of POST /api/opponents/validate. */
+export interface OpponentValidateResult {
+  ok: boolean;
+  errors: string[];
+}
+
 // ---- Arena battles ----------------------------------------------------------
 
 /** Body for POST /api/battle. Exactly one of `b_model_id` / `b_opponent_id`. */
