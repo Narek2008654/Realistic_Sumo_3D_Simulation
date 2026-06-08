@@ -39,6 +39,8 @@ data/*.npz
 data/registry/
 data/jobs/
 data/robots/
+data/battles/
+data/opponents/
 # Training logs.
 logs/
 *.log

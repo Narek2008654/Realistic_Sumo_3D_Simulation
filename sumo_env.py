@@ -595,6 +595,7 @@ class MiniSumoEnv(gym.Env):
         sensor_hard_dr: bool = False,
         opponent_weights: Optional[dict] = None,
         hardware_spec: Optional[HardwareSpec] = None,
+        extra_opponents: Optional[dict] = None,
     ) -> None:
         super().__init__()
         # E1b: the robot's sensing + observation contract is driven by a
@@ -681,6 +682,14 @@ class MiniSumoEnv(gym.Env):
         # entry. When None (default), reset() uniformly samples each
         # episode.  Set to e.g. "spinner" to lock in one controller.
         self.force_opponent_id: Optional[str] = force_opponent_id
+        # add/ui-local: optional user-authored opponent factories merged into
+        # the sampling pool. Maps a custom opponent id -> a zero-arg callable
+        # returning a fresh OpponentController. None (default) => behaviour is
+        # byte-identical to the built-in zoo (audit-green). A custom id can be
+        # pinned via force_opponent_id or weighted via opponent_weights.
+        self.extra_opponents: Optional[dict] = (
+            dict(extra_opponents) if extra_opponents else None
+        )
         # When True, the blue robot is driven by keyboard (WASD / arrows)
         # instead of the NovamaxController. Requires gui=True.
         self.human_enemy = bool(human_enemy)
@@ -977,6 +986,43 @@ class MiniSumoEnv(gym.Env):
     def _novamax_line_triggered(self, body_x: float, body_y: float) -> bool:
         """Backwards-compat wrapper for the enemy's line sensors."""
         return self._line_triggered_at(self.enemy_id, body_x, body_y)
+
+    def _sample_with_extra(self, sample_opponent, extra: dict):
+        """Weighted draw over the built-in zoo PLUS user-authored opponents.
+
+        ``extra`` maps custom id -> zero-arg controller factory. Built-in ids
+        keep their default/overridden weights; a custom id participates only
+        when ``opponent_weights`` assigns it a positive weight (default 0), so
+        merely registering a factory does not perturb the zoo distribution.
+        Returns ``(id, controller)``.
+        """
+        from opponents import OPPONENT_WEIGHTS
+
+        wmap = self.opponent_weights if self.opponent_weights is not None else OPPONENT_WEIGHTS
+        # Total weight assigned to custom ids in this episode's weight map.
+        custom_w = {cid: float(wmap.get(cid, 0.0)) for cid in extra}
+        custom_total = sum(custom_w.values())
+        if custom_total <= 0.0:
+            # No custom weight => fall back to the pure built-in draw (default
+            # distribution, byte-identical to no-extra behaviour).
+            return sample_opponent(self._np_random, self.opponent_weights)
+
+        # Built-in side keeps its own (possibly default) weights.
+        builtin_id, builtin_ctrl = sample_opponent(self._np_random, self.opponent_weights)
+        # Mix: pick custom-vs-builtin by their relative total weights. The
+        # built-in total is whatever sample_opponent normalised over.
+        builtin_total = sum(
+            float(wmap.get(name, 0.0)) for name in OPPONENT_WEIGHTS
+        )
+        grand = builtin_total + custom_total
+        if grand <= 0.0 or self._np_random.random() < (builtin_total / grand):
+            return builtin_id, builtin_ctrl
+        # Draw a custom id proportional to its weight.
+        ids = list(custom_w)
+        probs = [custom_w[i] / custom_total for i in ids]
+        idx = int(self._np_random.choice(len(ids), p=probs))
+        cid = ids[idx]
+        return cid, extra[cid]()
 
     def _novamax_caps(self) -> tuple[float, float]:
         """Resolve NovaMax's current (max_rad, max_force).
@@ -1584,9 +1630,23 @@ class MiniSumoEnv(gym.Env):
         # module can finish loading first (opponents/__init__.py imports
         # NovamaxController back from us).
         from opponents import make_opponent, sample_opponent
+        extra = self.extra_opponents
         if self.force_opponent_id is not None:
             self._opponent_id = self.force_opponent_id
-            self._enemy_ctrl = make_opponent(self._opponent_id)
+            # Prefer a user-authored factory when the pinned id is custom;
+            # fall back to the built-in zoo otherwise (default path unchanged).
+            if extra is not None and self._opponent_id in extra:
+                self._enemy_ctrl = extra[self._opponent_id]()
+            else:
+                self._enemy_ctrl = make_opponent(self._opponent_id)
+        elif extra:
+            # Merge custom factories into the weighted draw. Built-in ids keep
+            # their OPPONENT_WEIGHTS; custom ids only participate when given a
+            # positive weight in opponent_weights (default 0 => never sampled),
+            # so adding factories alone does not change the zoo distribution.
+            self._opponent_id, self._enemy_ctrl = self._sample_with_extra(
+                sample_opponent, extra,
+            )
         else:
             self._opponent_id, self._enemy_ctrl = sample_opponent(
                 self._np_random, self.opponent_weights,

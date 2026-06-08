@@ -86,18 +86,24 @@ def _pose(p, body_id) -> dict[str, list[float]]:
 def _battle_vs_opponent(
     net_a, opponent_id: str, rounds: int, mult: float, seed: int,
     hw_spec: HardwareSpec | None,
+    extra_opponents: dict | None = None,
 ) -> tuple[dict[str, int], dict[str, Any]]:
-    """Run ``rounds`` greedy rollouts of model A vs a zoo opponent.
+    """Run ``rounds`` greedy rollouts of model A vs a zoo or CUSTOM opponent.
 
     Returns ``(stats, trajectory)``. ``trajectory`` is the first decisive
     round's kinematics (falls back to the last round if every round timed out).
     Mirrors ``eval_best.run_eval`` but per-round so we can record one round and
     map outcomes to A/B wins.
+
+    A built-in zoo id must exist in ``OPPONENT_REGISTRY``; a custom id must be
+    supplied via ``extra_opponents`` (id -> controller factory), which is
+    merged into the env's sampling pool and pinned via ``force_opponent_id``.
     """
     from train_dqn_3d import build_env
     from webapp.shared.eval_and_record import _record_trajectory
 
-    if opponent_id not in __import__("opponents").OPPONENT_REGISTRY:
+    is_custom = bool(extra_opponents) and opponent_id in extra_opponents
+    if not is_custom and opponent_id not in __import__("opponents").OPPONENT_REGISTRY:
         raise BattleError(422, f"unknown opponent: {opponent_id}")
 
     stats = Counter()
@@ -109,6 +115,7 @@ def _battle_vs_opponent(
             gui=False, seed=seed + r,
             novamax_torque_mult=mult, force_opponent_id=opponent_id,
             narek_reward=False,
+            **({"extra_opponents": extra_opponents} if extra_opponents else {}),
             **({"hardware_spec": hw_spec} if hw_spec is not None else {}),
         )
         try:
@@ -287,6 +294,31 @@ def _full_stats(rounds: int, raw: dict[str, int]) -> dict[str, int]:
     }
 
 
+def _resolve_custom_opponent(
+    opponent_id: str, notes: list[str]
+) -> dict | None:
+    """If ``opponent_id`` names a saved custom opponent, return an
+    ``extra_opponents`` mapping ``{id: DslOpponent factory}``; else None
+    (a built-in zoo id, handled by ``_battle_vs_opponent`` directly).
+
+    Appends the standard-chassis note to ``notes`` when a custom opponent is
+    used, since its saved hardware_spec does not regenerate the enemy body.
+    """
+    from webapp.backend import opponents_store
+
+    record = opponents_store.get_opponent(opponent_id)
+    if record is None:
+        return None  # not a custom id -> let the zoo path validate it.
+
+    from opponents.dsl_runtime import DslOpponent
+    from webapp.shared.opponent_dsl import OpponentDSL
+
+    dsl = OpponentDSL.from_dict(record["behavior_dsl"])
+    if record.get("notes"):
+        notes.append(record["notes"])
+    return {opponent_id: lambda: DslOpponent(dsl)}
+
+
 def run_battle(req: dict[str, Any]) -> dict[str, Any]:
     """Run a head-to-head battle and persist the representative trajectory.
 
@@ -326,6 +358,14 @@ def run_battle(req: dict[str, Any]) -> dict[str, Any]:
             "side honors a_spec."
         )
 
+    # Resolve a CUSTOM opponent id (vs a built-in zoo id) up front, outside the
+    # PyBullet lock. A custom id is one saved via opponents_store; we build a
+    # DslOpponent factory from its behavior_dsl and hand it to the env's
+    # extra_opponents seam. Built-in zoo ids leave extra_opponents None.
+    extra_opponents: dict | None = None
+    if b_opponent_id:
+        extra_opponents = _resolve_custom_opponent(b_opponent_id, notes)
+
     net_a = _load_policy(a_model_id)
 
     # Single-client PyBullet: hold the lock for the whole sim section so the
@@ -339,7 +379,8 @@ def run_battle(req: dict[str, Any]) -> dict[str, Any]:
             )
         else:
             raw, trajectory = _battle_vs_opponent(
-                net_a, b_opponent_id, rounds, mult, seed, a_spec
+                net_a, b_opponent_id, rounds, mult, seed, a_spec,
+                extra_opponents=extra_opponents,
             )
 
     stats = _full_stats(rounds, raw)

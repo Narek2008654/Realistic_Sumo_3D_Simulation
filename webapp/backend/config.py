@@ -29,6 +29,10 @@ ROBOTS_DIR: Path = DATA / "robots"
 # (trajectory.json). Local-only, regenerable — never committed.
 BATTLES_DIR: Path = DATA / "battles"
 
+# User-authored custom opponents live under ``data/opponents/<id>/``
+# (opponent.json = HardwareSpec + behavior DSL). Local-only — never committed.
+OPPONENTS_DIR: Path = DATA / "opponents"
+
 
 def ensure_dirs() -> None:
     """Create the writable data sub-trees if they don't already exist."""
@@ -36,3 +40,4 @@ def ensure_dirs() -> None:
     JOBS_DIR.mkdir(parents=True, exist_ok=True)
     ROBOTS_DIR.mkdir(parents=True, exist_ok=True)
     BATTLES_DIR.mkdir(parents=True, exist_ok=True)
+    OPPONENTS_DIR.mkdir(parents=True, exist_ok=True)
