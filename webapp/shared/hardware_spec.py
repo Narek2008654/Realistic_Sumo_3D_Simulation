@@ -501,3 +501,41 @@ class HardwareSpec:
             engineered=engineered,
             dohyo=dohyo,
         )
+
+
+# ---------------------------------------------------------------------------
+# Mini-sumo class limits (regulation): <= 500 g, <= 10 x 10 cm footprint.
+# Enforced on the chassis box (length_m x width_m) + mass at authoring time
+# (robot/opponent save + /hardware/validate). The default and the faithful
+# novamax both fit, so the gate never rejects the baseline.
+# ---------------------------------------------------------------------------
+MINI_SUMO_MAX_MASS_KG = 0.5
+MINI_SUMO_MAX_FOOTPRINT_M = 0.10
+
+
+def mini_sumo_violations(spec: "HardwareSpec") -> list[str]:
+    """Human-readable reasons ``spec`` breaks the mini-sumo class limits.
+
+    Empty list == compliant. Checks the chassis box footprint
+    (``length_m`` x ``width_m``) and ``mass_kg`` against the 10x10 cm / 500 g
+    regulation, with a tiny tolerance for float noise.
+    """
+    tol = 1e-6
+    c = spec.chassis
+    out: list[str] = []
+    if c.mass_kg > MINI_SUMO_MAX_MASS_KG + tol:
+        out.append(
+            f"mass {c.mass_kg * 1000:.0f} g exceeds the mini-sumo limit of "
+            f"{MINI_SUMO_MAX_MASS_KG * 1000:.0f} g"
+        )
+    if c.length_m > MINI_SUMO_MAX_FOOTPRINT_M + tol:
+        out.append(
+            f"body length {c.length_m * 100:.1f} cm exceeds the mini-sumo limit "
+            f"of {MINI_SUMO_MAX_FOOTPRINT_M * 100:.0f} cm"
+        )
+    if c.width_m > MINI_SUMO_MAX_FOOTPRINT_M + tol:
+        out.append(
+            f"body width {c.width_m * 100:.1f} cm exceeds the mini-sumo limit "
+            f"of {MINI_SUMO_MAX_FOOTPRINT_M * 100:.0f} cm"
+        )
+    return out

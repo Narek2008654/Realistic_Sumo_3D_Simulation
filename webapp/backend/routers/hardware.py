@@ -24,7 +24,7 @@ from webapp.backend import registry
 from webapp.backend.pybullet_lock import pybullet_lock
 from webapp.shared.geometry_export import spec_to_geometry
 from webapp.shared.hardware_presets import list_presets
-from webapp.shared.hardware_spec import HardwareSpec
+from webapp.shared.hardware_spec import HardwareSpec, mini_sumo_violations
 from webapp.shared.urdf_gen import generate_urdf
 
 router = APIRouter(prefix="/api/hardware", tags=["hardware"])
@@ -105,6 +105,7 @@ def validate(body: dict[str, Any] = Body(...)) -> dict[str, Any]:
     """Validate a HardwareSpec: dims, signature, URDF load, candidates."""
     errors: list[str] = []
     spec = _parse_spec(body)
+    errors.extend(mini_sumo_violations(spec))
 
     urdf_valid = False
     try:

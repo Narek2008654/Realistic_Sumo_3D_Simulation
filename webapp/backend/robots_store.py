@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from webapp.backend import config
-from webapp.shared.hardware_spec import HardwareSpec
+from webapp.shared.hardware_spec import HardwareSpec, mini_sumo_violations
 from webapp.shared.urdf_gen import generate_urdf
 
 __all__ = [
@@ -130,6 +130,9 @@ def save_robot(name: str, spec_dict: dict[str, Any]) -> dict[str, Any]:
         spec = HardwareSpec.from_dict(spec_dict)
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError(f"invalid HardwareSpec: {exc}") from exc
+    violations = mini_sumo_violations(spec)
+    if violations:
+        raise ValueError("not mini-sumo legal: " + "; ".join(violations))
 
     try:
         urdf = generate_urdf(spec)

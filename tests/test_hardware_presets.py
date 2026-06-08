@@ -23,7 +23,10 @@ from webapp.shared.hardware_presets import (  # noqa: E402
     get_preset,
     list_presets,
 )
-from webapp.shared.hardware_spec import HardwareSpec  # noqa: E402
+from webapp.shared.hardware_spec import (  # noqa: E402
+    HardwareSpec,
+    mini_sumo_violations,
+)
 
 # Faithful-NovaMax reference numbers (assets/novamax.urdf + sumo_env NOVAMAX_*).
 _NOVAMAX_MAX_RAD = (800.0 / 60.0) * 2.0 * math.pi   # 83.776 rad/s, NOVAMAX_MAX_RAD
@@ -56,6 +59,14 @@ def test_every_preset_round_trips() -> None:
         assert spec.drivetrain.max_torque_nm > 0
 
 
+def test_all_presets_mini_sumo_legal() -> None:
+    """Every shipped preset must obey the mini-sumo class (<=500 g, <=10x10 cm),
+    so it can be saved as a robot/opponent without tripping the gate."""
+    for p in list_presets():
+        spec = HardwareSpec.from_dict(p["hardware_spec"])
+        assert mini_sumo_violations(spec) == [], (p["id"], mini_sumo_violations(spec))
+
+
 def test_novamax_is_faithful() -> None:
     spec = HardwareSpec.from_dict(get_preset("novamax")["hardware_spec"])
     c, d = spec.chassis, spec.drivetrain
@@ -77,6 +88,7 @@ def _main() -> int:
     tests = [
         ("all_presets_present", test_all_presets_present),
         ("every_preset_round_trips", test_every_preset_round_trips),
+        ("all_presets_mini_sumo_legal", test_all_presets_mini_sumo_legal),
         ("novamax_is_faithful", test_novamax_is_faithful),
     ]
     passed, failed = [], []

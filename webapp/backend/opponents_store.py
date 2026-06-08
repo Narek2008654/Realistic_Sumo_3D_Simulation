@@ -43,7 +43,7 @@ from pathlib import Path
 from typing import Any
 
 from webapp.backend import config
-from webapp.shared.hardware_spec import HardwareSpec
+from webapp.shared.hardware_spec import HardwareSpec, mini_sumo_violations
 from webapp.shared.opponent_dsl import OpponentDSL, validate
 
 __all__ = [
@@ -205,6 +205,9 @@ def save_opponent(
         spec = HardwareSpec.from_dict(hardware_spec)
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError(f"invalid HardwareSpec: {exc}") from exc
+    violations = mini_sumo_violations(spec)
+    if violations:
+        raise ValueError("not mini-sumo legal: " + "; ".join(violations))
 
     # Resolve the behavior from either the new ``behavior`` object or the legacy
     # ``behavior_dsl`` shorthand (exactly one).

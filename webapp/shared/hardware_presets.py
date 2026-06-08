@@ -133,9 +133,9 @@ def _wedge_pusher() -> HardwareSpec:
     chassis = replace(
         base.chassis,
         length_m=0.080,
-        width_m=0.110,                          # wide
+        width_m=0.100,                          # wide (at the 10 cm class limit)
         height_m=0.030,                         # low
-        mass_kg=0.55,
+        mass_kg=0.50,                           # at the 500 g class limit
         com_xyz=(-0.010, 0.0, 0.006),           # low CoM, slightly rear
         wedge_present=True,
         wedge_length_m=wedge_run,               # long plow
@@ -187,7 +187,7 @@ def _heavy_rammer() -> HardwareSpec:
         length_m=0.100,
         width_m=0.100,
         height_m=0.055,
-        mass_kg=0.85,                           # heavy
+        mass_kg=0.50,                           # heavy — at the 500 g class limit
         com_xyz=(0.0, 0.0, 0.012),
         wedge_present=False,                    # no wedge — pure ram
         wedge_length_m=0.0,
