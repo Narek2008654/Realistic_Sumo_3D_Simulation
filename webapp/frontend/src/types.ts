@@ -174,6 +174,18 @@ export interface ModelCard {
 export type TrainAlgo = 'dqn' | 'ppo';
 export type TrainMode = 'scratch' | 'finetune';
 
+/** Editable subset of hyperparameters POSTed in `hyperparams`. All optional so
+ *  the backend falls back to its own constants for anything omitted. */
+export interface TrainHyperparamOverrides {
+  lr?: number;
+  gamma?: number;
+  net_arch?: [number, number];
+  n_step?: number; // DQN
+  tau?: number; // DQN
+  ent_coef?: number; // PPO
+  clip?: number; // PPO
+}
+
 export interface StartTrainBody {
   robot_id?: string;
   hardware_spec?: HardwareSpec;
@@ -182,17 +194,23 @@ export interface StartTrainBody {
   base_model_id?: string;
   total_steps?: number;
   eval_every?: number;
+  start_mult?: number;
+  hyperparams?: TrainHyperparamOverrides;
   opponent_weights?: Record<string, number> | null;
   smoke?: boolean;
   seed?: number;
 }
 
+/** Full hyperparameter block returned by /api/train/recommend. */
 export interface TrainHyperparams {
   lr: number;
+  net_arch: [number, number];
+  start_mult: number;
   gamma: number;
-  batch_size: number;
-  eps_start: number;
-  eps_end: number;
+  n_step: number;
+  tau: number;
+  ent_coef: number;
+  clip: number;
 }
 
 export interface RecommendResult {
@@ -203,6 +221,19 @@ export interface RecommendResult {
   start_mult: number;
   hyperparams: TrainHyperparams;
   est_minutes: number;
+}
+
+// ---- Training opponents ------------------------------------------------------
+
+export interface TrainOpponent {
+  id: string;
+  default_weight: number;
+  held_out: boolean;
+}
+
+export interface TrainOpponentsResult {
+  opponents: TrainOpponent[];
+  weights_normalized: boolean;
 }
 
 /** Per-opponent eval block from scripts.eval_best.run_eval. */

@@ -11,6 +11,7 @@ import type {
   RobotSummary,
   StartTrainBody,
   TrainJobSummary,
+  TrainOpponentsResult,
   TrainMode,
   TrainStatus,
   Trajectory,
@@ -137,6 +138,9 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ hardware_spec, mode }),
     }),
+
+  trainOpponents: () =>
+    request<TrainOpponentsResult>('/api/train/opponents'),
 
   // Trajectory JSON for a job's checkpoint step (kinematics only).
   getTrajectory: (job: string, step: number | string) =>

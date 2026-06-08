@@ -14,10 +14,20 @@
 //    the TrajectoryPlayer.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { Dispatch, SetStateAction } from 'react';
 import { Link } from 'react-router-dom';
 import { api, ApiError } from '../api';
 import { Panel, Reveal, StatusPill } from '../components/ui';
+import { SliderField } from '../components/fields';
 import { TrajectoryPlayer } from '../components/TrajectoryPlayer';
+import {
+  clearTrainSetup,
+  loadTrainSetup,
+  saveTrainSetup,
+  type OppChoice,
+  type SourceKind,
+  type TrainSetup,
+} from '../store/trainSetup';
 import type {
   CheckpointEvent,
   HardwareSpec,
@@ -26,7 +36,9 @@ import type {
   RobotSummary,
   StartTrainBody,
   TrainAlgo,
+  TrainHyperparamOverrides,
   TrainMode,
+  TrainOpponent,
   TrainStatus,
   Trajectory,
 } from '../types';
@@ -213,38 +225,157 @@ function MiniBar({ frac, color }: { frac: number; color: string }) {
 }
 
 // ---------------------------------------------------------------------------
+// Opponent mix — renormalization
+// ---------------------------------------------------------------------------
+// Normalize the INCLUDED opponents' raw weights so they sum to 1.0. Unchecked
+// opponents contribute nothing and are dropped from the result. If every
+// included weight is zero (or the set is empty) we fall back to an equal split
+// across the included ids so Σ stays exactly 1.00.
+function normalizedWeights(
+  opps: Record<string, OppChoice>,
+): Record<string, number> {
+  const included = Object.entries(opps).filter(([, c]) => c.on);
+  if (included.length === 0) return {};
+  const total = included.reduce((s, [, c]) => s + Math.max(0, c.weight), 0);
+  const out: Record<string, number> = {};
+  if (total <= 0) {
+    const equal = 1 / included.length;
+    for (const [id] of included) out[id] = equal;
+    return out;
+  }
+  for (const [id, c] of included) out[id] = Math.max(0, c.weight) / total;
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // Setup panel
 // ---------------------------------------------------------------------------
-type SourceKind = 'current' | 'robot';
+function IntPairField({
+  label,
+  value,
+  onChange,
+  disabled = false,
+  note,
+}: {
+  label: string;
+  value: [number, number];
+  onChange: (v: [number, number]) => void;
+  disabled?: boolean;
+  note?: string;
+}) {
+  return (
+    <div className="flex flex-col gap-1">
+      <span className="micro text-fg-2" style={{ fontSize: 9 }}>
+        {label}
+        {note && <span style={{ color: 'var(--fg-2)' }}> · {note}</span>}
+      </span>
+      <div className="flex items-center gap-2">
+        {[0, 1].map((i) => (
+          <input
+            key={i}
+            type="number"
+            className="ctl num"
+            disabled={disabled}
+            style={{ height: 30, fontSize: 12, opacity: disabled ? 0.55 : 1 }}
+            value={value[i]}
+            step={8}
+            min={4}
+            onChange={(e) => {
+              const v = parseInt(e.target.value, 10);
+              if (!Number.isFinite(v)) return;
+              const next: [number, number] = [...value] as [number, number];
+              next[i] = v;
+              onChange(next);
+            }}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
 
+// Restore once at module-eval so initial state can seed from localStorage
+// without a flash of defaults. Merged field-by-field below (missing fields fall
+// back to defaults / fresh recommend).
 function Setup({ onStarted }: { onStarted: (jobId: string) => void }) {
-  const [robots, setRobots] = useState<RobotSummary[]>([]);
-  const [sourceKind, setSourceKind] = useState<SourceKind>('current');
-  const [robotId, setRobotId] = useState<string>('');
+  const savedRef = useRef<Partial<TrainSetup> | null>(loadTrainSetup());
+  const saved = savedRef.current;
 
-  const [algo, setAlgo] = useState<TrainAlgo>('dqn');
-  const [mode, setMode] = useState<TrainMode>('scratch');
-  const [smoke, setSmoke] = useState(false);
+  const [robots, setRobots] = useState<RobotSummary[]>([]);
+  const [sourceKind, setSourceKind] = useState<SourceKind>(saved?.sourceKind ?? 'current');
+  const [robotId, setRobotId] = useState<string>(saved?.robotId ?? '');
+
+  const [algo, setAlgo] = useState<TrainAlgo>(saved?.algo ?? 'dqn');
+  const [mode, setMode] = useState<TrainMode>(saved?.mode ?? 'scratch');
+  const [smoke, setSmoke] = useState(saved?.smoke ?? false);
 
   const [defaultSpec, setDefaultSpec] = useState<HardwareSpec | null>(null);
   const [robotSpec, setRobotSpec] = useState<HardwareSpec | null>(null);
   const [sourceSig, setSourceSig] = useState<string | null>(null);
 
   const [models, setModels] = useState<ModelCard[]>([]);
-  const [baseModelId, setBaseModelId] = useState<string>('');
+  const [baseModelId, setBaseModelId] = useState<string>(saved?.baseModelId ?? '');
 
   const [rec, setRec] = useState<RecommendResult | null>(null);
-  const [totalSteps, setTotalSteps] = useState(0);
-  const [evalEvery, setEvalEvery] = useState(0);
+  const [totalSteps, setTotalSteps] = useState(saved?.totalSteps ?? 0);
+  const [evalEvery, setEvalEvery] = useState(saved?.evalEvery ?? 0);
+
+  // Editable hyperparameters (pre-filled from recommend; restored from save).
+  const [startMult, setStartMult] = useState(saved?.startMult ?? 1.0);
+  const [lr, setLr] = useState(saved?.hyperparams?.lr ?? 3e-4);
+  const [gamma, setGamma] = useState(saved?.hyperparams?.gamma ?? 0.99);
+  const [nStep, setNStep] = useState(saved?.hyperparams?.n_step ?? 3);
+  const [tau, setTau] = useState(saved?.hyperparams?.tau ?? 5e-3);
+  const [entCoef, setEntCoef] = useState(saved?.hyperparams?.ent_coef ?? 0.02);
+  const [clip, setClip] = useState(saved?.hyperparams?.clip ?? 0.2);
+  const [netArch, setNetArch] = useState<[number, number]>(
+    saved?.hyperparams?.net_arch ?? [32, 32],
+  );
+  const [advanced, setAdvanced] = useState(false);
+
+  // Opponent mix: id -> {on, weight}. Seeded from /api/train/opponents (held-out
+  // unchecked) once loaded, then merged with any saved choices.
+  const [oppList, setOppList] = useState<TrainOpponent[]>([]);
+  const [opps, setOpps] = useState<Record<string, OppChoice>>(saved?.opponents ?? {});
 
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // True only while the recommend response should overwrite the live HP fields.
+  // We DON'T clobber values the user restored from a save; recommend still fills
+  // anything the save lacked (handled in applyRecommend).
+  const recAppliedRef = useRef(saved != null);
 
   // Load robots + models + the default spec once.
   useEffect(() => {
     api.listRobots().then(setRobots).catch(() => {});
     api.models().then(setModels).catch(() => {});
     api.hardwareDefault().then(setDefaultSpec).catch(() => {});
+  }, []);
+
+  // Load the opponent zoo + seed include/weight. Default-check seen opponents
+  // with their default_weight; show held-out (feinter/orbiter) UNCHECKED. Merge
+  // saved choices on top so a restored setup wins.
+  useEffect(() => {
+    api
+      .trainOpponents()
+      .then(({ opponents }) => {
+        setOppList(opponents);
+        setOpps((prev) => {
+          const next: Record<string, OppChoice> = {};
+          for (const o of opponents) {
+            const savedChoice = saved?.opponents?.[o.id] ?? prev[o.id];
+            next[o.id] = savedChoice ?? {
+              on: !o.held_out,
+              weight: o.default_weight > 0 ? o.default_weight : 1 / opponents.length,
+            };
+          }
+          return next;
+        });
+      })
+      .catch(() => {});
+    // saved is stable (module-eval ref); run once.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // The active source spec (current/default vs the picked robot).
@@ -277,18 +408,46 @@ function Setup({ onStarted }: { onStarted: (jobId: string) => void }) {
     }
   }, [sourceKind, defaultSpec]);
 
-  // Pull recommended hyperparameters whenever source spec or mode changes.
+  // Force every editable HP field to the recommended values.
+  const applyRecommend = useCallback((r: RecommendResult) => {
+    const h = r.hyperparams;
+    setAlgo(r.algo);
+    setTotalSteps(r.total_steps);
+    setEvalEvery(r.eval_every);
+    setStartMult(r.start_mult);
+    setLr(h.lr);
+    setGamma(h.gamma);
+    setNStep(h.n_step);
+    setTau(h.tau);
+    setEntCoef(h.ent_coef);
+    setClip(h.clip);
+    setNetArch(r.net_arch);
+  }, []);
+
+  // Pull recommended hyperparameters whenever source spec or mode changes. On
+  // the very first run with a restored save we keep the user's edits and only
+  // record `rec` (for ghost/reset). Afterwards, changing source/mode re-applies
+  // recommended values — except start_mult on finetune is authoritative (3.0).
   useEffect(() => {
     api
       .recommendTrain(sourceSpec, mode)
       .then((r) => {
         setRec(r);
-        setAlgo(r.algo);
-        setTotalSteps(r.total_steps);
-        setEvalEvery(r.eval_every);
+        if (recAppliedRef.current) {
+          // First load after a restore: don't clobber the saved edits, but for
+          // finetune force start_mult to the backend's authoritative 3.0 and
+          // lock net_arch to the recommended pairing.
+          recAppliedRef.current = false;
+          if (mode === 'finetune') {
+            setStartMult(r.start_mult);
+            setNetArch(r.net_arch);
+          }
+          return;
+        }
+        applyRecommend(r);
       })
       .catch(() => {});
-  }, [sourceSpec, mode]);
+  }, [sourceSpec, mode, applyRecommend]);
 
   // Compatible base models for finetune: same obs signature as the source.
   const compatibleModels = useMemo(
@@ -310,6 +469,89 @@ function Setup({ onStarted }: { onStarted: (jobId: string) => void }) {
   const baseMissing = needsBase && !baseModelId;
   const robotMissing = sourceKind === 'robot' && !robotId;
 
+  // net_arch is locked to the base model on finetune (must match it).
+  const netArchLocked = mode === 'finetune';
+
+  // The algo-specific hyperparams that go in the POST body. Omit ones that
+  // don't apply to the chosen algorithm so the backend ignores them cleanly.
+  const hyperparams = useMemo<TrainHyperparamOverrides>(() => {
+    const hp: TrainHyperparamOverrides = { lr, gamma, net_arch: netArch };
+    if (algo === 'dqn') {
+      hp.n_step = nStep;
+      hp.tau = tau;
+    } else {
+      hp.ent_coef = entCoef;
+      hp.clip = clip;
+    }
+    return hp;
+  }, [algo, lr, gamma, netArch, nStep, tau, entCoef, clip]);
+
+  // Auto-renormalized included weights (Σ = 1.00). Sent in the POST body and
+  // surfaced live in the editor.
+  const normWeights = useMemo(() => normalizedWeights(opps), [opps]);
+  const includedCount = useMemo(
+    () => Object.values(opps).filter((c) => c.on).length,
+    [opps],
+  );
+  const noOpponents = includedCount === 0;
+
+  // Snapshot the full setup for persistence.
+  const setupSnapshot = useCallback(
+    (): TrainSetup => ({
+      sourceKind,
+      robotId,
+      algo,
+      mode,
+      baseModelId,
+      totalSteps,
+      evalEvery,
+      startMult,
+      hyperparams: {
+        lr,
+        gamma,
+        net_arch: netArch,
+        n_step: nStep,
+        tau,
+        ent_coef: entCoef,
+        clip,
+      },
+      smoke,
+      opponents: opps,
+    }),
+    [
+      sourceKind, robotId, algo, mode, baseModelId, totalSteps, evalEvery,
+      startMult, lr, gamma, netArch, nStep, tau, entCoef, clip, smoke, opps,
+    ],
+  );
+
+  // Persist on change (debounced ~400ms). Restored on next mount.
+  useEffect(() => {
+    const snap = setupSnapshot();
+    const t = window.setTimeout(() => saveTrainSetup(snap), 400);
+    return () => window.clearTimeout(t);
+  }, [setupSnapshot]);
+
+  function resetSetup() {
+    clearTrainSetup();
+    setSourceKind('current');
+    setRobotId('');
+    setMode('scratch');
+    setBaseModelId('');
+    setSmoke(false);
+    if (rec) applyRecommend(rec);
+    // Re-seed opponents to backend defaults.
+    setOpps(() => {
+      const next: Record<string, OppChoice> = {};
+      for (const o of oppList) {
+        next[o.id] = {
+          on: !o.held_out,
+          weight: o.default_weight > 0 ? o.default_weight : 1 / oppList.length,
+        };
+      }
+      return next;
+    });
+  }
+
   const etaMinutes = useMemo(() => {
     if (!rec) return null;
     if (rec.total_steps <= 0) return rec.est_minutes;
@@ -328,11 +570,15 @@ function Setup({ onStarted }: { onStarted: (jobId: string) => void }) {
   async function start() {
     setStarting(true);
     setError(null);
+    saveTrainSetup(setupSnapshot()); // persist on submit too
     const body: StartTrainBody = {
       algo,
       mode,
       total_steps: totalSteps || undefined,
       eval_every: evalEvery || undefined,
+      start_mult: startMult,
+      hyperparams,
+      opponent_weights: Object.keys(normWeights).length ? normWeights : undefined,
       smoke: smoke || undefined,
     };
     if (sourceKind === 'robot') body.robot_id = robotId;
@@ -451,20 +697,17 @@ function Setup({ onStarted }: { onStarted: (jobId: string) => void }) {
             </div>
           )}
 
-          {/* Hyperparameters */}
-          <div className="flex flex-col gap-2">
+          {/* Hyperparameters — editable, pre-filled from recommend */}
+          <div className="flex flex-col gap-3">
             <div className="flex items-center justify-between">
               <span className="micro text-fg-2" style={{ fontSize: 10 }}>
-                HYPERPARAMETERS · RECOMMENDED
+                HYPERPARAMETERS
               </span>
               {rec && (
                 <button
                   type="button"
                   className="micro"
-                  onClick={() => {
-                    setTotalSteps(rec.total_steps);
-                    setEvalEvery(rec.eval_every);
-                  }}
+                  onClick={() => applyRecommend(rec)}
                   style={{
                     fontSize: 9,
                     color: 'var(--fg-2)',
@@ -472,12 +715,14 @@ function Setup({ onStarted }: { onStarted: (jobId: string) => void }) {
                     border: 'none',
                     cursor: 'pointer',
                   }}
-                  title="Reset to recommended"
+                  title="Reset all hyperparameters to the recommended values"
                 >
-                  ⟲ RESET
+                  ⟲ RESET TO RECOMMENDED
                 </button>
               )}
             </div>
+
+            {/* Basic: budget + the two most-tuned knobs */}
             <div className="grid grid-cols-2 gap-3">
               <HpField
                 label="TOTAL STEPS"
@@ -492,14 +737,75 @@ function Setup({ onStarted }: { onStarted: (jobId: string) => void }) {
                 step={10000}
               />
             </div>
-            {rec && (
-              <div className="grid grid-cols-3 gap-2 pt-1">
-                <RecChip label="NET" value={`${rec.net_arch[0]}×${rec.net_arch[1]}`} />
-                <RecChip label="START MULT" value={rec.start_mult.toFixed(2)} />
-                <RecChip label="LR" value={rec.hyperparams.lr.toExponential(0)} />
+            <SliderField
+              label="START MULT"
+              info="curriculum"
+              value={startMult}
+              onChange={setStartMult}
+              min={0.5}
+              max={5}
+              step={0.05}
+              format={(v) => v.toFixed(2)}
+            />
+            <HpField label="LEARNING RATE" value={lr} onChange={setLr} step={0.00005} />
+
+            {/* Advanced (collapsible) */}
+            <button
+              type="button"
+              className="micro flex items-center gap-1.5"
+              onClick={() => setAdvanced((a) => !a)}
+              style={{
+                fontSize: 9,
+                color: 'var(--cyan)',
+                background: 'transparent',
+                border: 'none',
+                cursor: 'pointer',
+                alignSelf: 'flex-start',
+              }}
+            >
+              {advanced ? '▾' : '▸'} ADVANCED
+            </button>
+            {advanced && (
+              <div className="flex flex-col gap-3 rounded border p-3"
+                style={{ borderColor: 'var(--line)', background: 'var(--bg-2)' }}>
+                <SliderField
+                  label="GAMMA"
+                  value={gamma}
+                  onChange={setGamma}
+                  min={0.9}
+                  max={0.999}
+                  step={0.001}
+                  format={(v) => v.toFixed(3)}
+                />
+                {algo === 'dqn' ? (
+                  <div className="grid grid-cols-2 gap-3">
+                    <HpField label="N-STEP" value={nStep} onChange={(v) => setNStep(Math.round(v))} step={1} />
+                    <HpField label="TAU (POLYAK)" value={tau} onChange={setTau} step={0.001} />
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-2 gap-3">
+                    <HpField label="ENT COEF" value={entCoef} onChange={setEntCoef} step={0.005} />
+                    <HpField label="CLIP" value={clip} onChange={setClip} step={0.01} />
+                  </div>
+                )}
+                <IntPairField
+                  label="NET ARCH"
+                  value={netArch}
+                  onChange={setNetArch}
+                  disabled={netArchLocked}
+                  note={netArchLocked ? 'matches the base model' : 'two hidden layers'}
+                />
               </div>
             )}
           </div>
+
+          {/* Opponent mix editor */}
+          <OpponentEditor
+            list={oppList}
+            opps={opps}
+            setOpps={setOpps}
+            normWeights={normWeights}
+          />
 
           {/* Smoke toggle */}
           <label className="flex cursor-pointer items-center gap-2">
@@ -514,20 +820,36 @@ function Setup({ onStarted }: { onStarted: (jobId: string) => void }) {
             </span>
           </label>
 
+          {noOpponents && (
+            <div className="num" style={{ fontSize: 11, color: 'var(--warn)' }}>
+              Select at least one opponent for the training mix.
+            </div>
+          )}
           {error && (
             <div className="num" style={{ fontSize: 11, color: 'var(--loss)' }}>
               {error}
             </div>
           )}
 
-          <button
-            className="btn btn-primary"
-            disabled={starting || robotMissing || baseMissing}
-            onClick={start}
-            style={{ height: 38, fontSize: 14 }}
-          >
-            {starting ? 'LAUNCHING…' : 'TRAIN'}
-          </button>
+          <div className="flex items-center gap-3">
+            <button
+              className="btn btn-primary"
+              disabled={starting || robotMissing || baseMissing || noOpponents}
+              onClick={start}
+              style={{ height: 38, fontSize: 14, flex: 1 }}
+            >
+              {starting ? 'LAUNCHING…' : 'TRAIN'}
+            </button>
+            <button
+              type="button"
+              className="btn btn-ghost"
+              onClick={resetSetup}
+              title="Clear the saved setup and restore recommended defaults"
+              style={{ height: 38, fontSize: 11 }}
+            >
+              RESET SETUP
+            </button>
+          </div>
         </Panel>
       </Reveal>
 
@@ -565,18 +887,119 @@ function Setup({ onStarted }: { onStarted: (jobId: string) => void }) {
   );
 }
 
-function RecChip({ label, value }: { label: string; value: string }) {
+// ---------------------------------------------------------------------------
+// Opponent-weights editor
+// ---------------------------------------------------------------------------
+// Each opponent: a checkbox (include in the mix) + a raw weight input. The
+// displayed normalized value (and Σ) come from `normWeights`, recomputed on
+// every include/weight change so the included set always sums to 1.00.
+function OpponentEditor({
+  list,
+  opps,
+  setOpps,
+  normWeights,
+}: {
+  list: TrainOpponent[];
+  opps: Record<string, OppChoice>;
+  setOpps: Dispatch<SetStateAction<Record<string, OppChoice>>>;
+  normWeights: Record<string, number>;
+}) {
+  const includedCount = Object.values(opps).filter((c) => c.on).length;
+  const sum = Object.values(normWeights).reduce((s, w) => s + w, 0);
+
+  function toggle(id: string) {
+    setOpps((prev) => {
+      const cur = prev[id] ?? { on: false, weight: 0 };
+      // Guard: never let the last included opponent be unchecked.
+      if (cur.on && includedCount <= 1) return prev;
+      return { ...prev, [id]: { ...cur, on: !cur.on } };
+    });
+  }
+
+  function setWeight(id: string, weight: number) {
+    setOpps((prev) => {
+      const cur = prev[id] ?? { on: true, weight: 0 };
+      return { ...prev, [id]: { ...cur, weight: Math.max(0, weight) } };
+    });
+  }
+
   return (
-    <div
-      className="flex flex-col rounded border px-2 py-1.5"
-      style={{ borderColor: 'var(--line)', background: 'var(--bg-2)' }}
-    >
-      <span className="micro text-fg-2" style={{ fontSize: 8 }}>
-        {label}
+    <div className="flex flex-col gap-2">
+      <div className="flex items-center justify-between">
+        <span className="micro text-fg-2" style={{ fontSize: 10 }}>
+          OPPONENT MIX
+        </span>
+        <span
+          className="num"
+          style={{ fontSize: 10, color: includedCount ? 'var(--win)' : 'var(--warn)' }}
+        >
+          Σ = {sum.toFixed(2)} · {includedCount} active
+        </span>
+      </div>
+      <span className="num text-fg-2" style={{ fontSize: 10 }}>
+        Check opponents to include; weights auto-normalize to 1.00.
       </span>
-      <span className="num" style={{ fontSize: 12, color: 'var(--cyan)' }}>
-        {value}
-      </span>
+      <div
+        className="flex flex-col divide-y rounded border"
+        style={{ borderColor: 'var(--line)' }}
+      >
+        {list.map((o) => {
+          const choice = opps[o.id] ?? { on: false, weight: o.default_weight };
+          const norm = normWeights[o.id];
+          return (
+            <div
+              key={o.id}
+              className="flex items-center gap-3 px-3 py-2"
+              style={{
+                borderColor: 'var(--line)',
+                opacity: choice.on ? 1 : 0.55,
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={choice.on}
+                onChange={() => toggle(o.id)}
+                style={{ accentColor: 'var(--accent)' }}
+              />
+              <span
+                className="num text-fg-1"
+                style={{ fontSize: 12, minWidth: 84, flex: 1 }}
+              >
+                {o.id}
+                {o.held_out && (
+                  <span className="micro" style={{ fontSize: 8, color: 'var(--cyan)' }}>
+                    {' '}· EVAL-ONLY
+                  </span>
+                )}
+              </span>
+              <input
+                type="number"
+                className="ctl num"
+                value={choice.weight}
+                min={0}
+                step={0.05}
+                disabled={!choice.on}
+                onChange={(e) => {
+                  const v = parseFloat(e.target.value);
+                  if (Number.isFinite(v)) setWeight(o.id, v);
+                }}
+                style={{ width: 72, height: 28, fontSize: 11, textAlign: 'right' }}
+              />
+              <span
+                className="num"
+                style={{
+                  fontSize: 11,
+                  minWidth: 42,
+                  textAlign: 'right',
+                  color: choice.on ? 'var(--cyan)' : 'var(--fg-2)',
+                }}
+              >
+                {choice.on && norm != null ? `${(norm * 100).toFixed(0)}%` : '—'}
+              </span>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
