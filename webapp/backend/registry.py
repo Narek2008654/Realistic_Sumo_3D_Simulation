@@ -36,7 +36,20 @@ __all__ = [
     "get_model",
     "finetune_candidates",
     "evaluate_model",
+    "delete_model",
+    "PROTECTED_MODEL_IDS",
 ]
+
+# Deploy / canonical checkpoints that the UI must NOT delete (these are the
+# committed, git-tracked models — the deployed champion + the BC bases). They
+# can still be removed deliberately with git if truly needed.
+PROTECTED_MODEL_IDS = frozenset({
+    "ppo_robust_best",
+    "dqn3d_stack_stageA_best",
+    "dqn_3d_bc_actor_best",
+    "dqn_3d_bc_actor_final",
+    "dqn_3d_bc_oldphys_best",
+})
 
 # The obs/action contract of TODAY's robot. Legacy checkpoints that happen to
 # match it (21-dim obs, 9 actions) are tagged with this signature so the UI
@@ -165,6 +178,10 @@ def scan_checkpoints() -> list[dict[str, Any]]:
             card["metrics"] = cached["metrics"]
         _write_card(card)
         cards.append(card)
+    # 'protected' is a runtime property (not persisted), so it's always correct
+    # even for cards loaded from an older cache.
+    for c in cards:
+        c["protected"] = c.get("id") in PROTECTED_MODEL_IDS
     return cards
 
 
@@ -180,17 +197,36 @@ def get_model(model_id: str) -> dict[str, Any] | None:
         return None
     cached = _read_card(model_id)
     if cached is not None and _card_is_fresh(cached, pt_path):
-        return cached
-    try:
-        card = _build_card(pt_path)
-    except ValueError:
-        return None
-    if cached is not None and cached.get("metrics") is not None and \
-            cached.get("obs_dim") == card["obs_dim"] and \
-            cached.get("action_dim") == card["action_dim"]:
-        card["metrics"] = cached["metrics"]
-    _write_card(card)
+        card = cached
+    else:
+        try:
+            card = _build_card(pt_path)
+        except ValueError:
+            return None
+        if cached is not None and cached.get("metrics") is not None and \
+                cached.get("obs_dim") == card["obs_dim"] and \
+                cached.get("action_dim") == card["action_dim"]:
+            card["metrics"] = cached["metrics"]
+        _write_card(card)
+    card["protected"] = model_id in PROTECTED_MODEL_IDS
     return card
+
+
+def delete_model(model_id: str) -> bool:
+    """Delete a checkpoint and its cached registry card.
+
+    Returns ``False`` if no such checkpoint exists. Raises ``ValueError`` for a
+    protected (deployed/canonical) model — those are committed and must be
+    removed deliberately via git, not the UI.
+    """
+    pt_path = _checkpoint_for(model_id)
+    if pt_path is None:
+        return False
+    if model_id in PROTECTED_MODEL_IDS:
+        raise ValueError(f"{model_id} is a protected/deployed model")
+    pt_path.unlink(missing_ok=True)
+    _card_path(model_id).unlink(missing_ok=True)
+    return True
 
 
 def finetune_candidates(

@@ -84,6 +84,12 @@ export const api = {
       method: 'POST',
     }),
 
+  // Delete a checkpoint + its cached card. 409 for a protected/deployed model.
+  deleteModel: (id: string) =>
+    request<{ deleted: boolean; id: string }>(`/api/models/${id}`, {
+      method: 'DELETE',
+    }),
+
   // ---- Saved robots --------------------------------------------------------
   saveRobot: (name: string, spec: HardwareSpec) =>
     request<RobotRecord>('/api/robots', {

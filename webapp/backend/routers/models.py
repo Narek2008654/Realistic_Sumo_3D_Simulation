@@ -37,6 +37,18 @@ def finetune_candidates(model_id: str) -> list[dict[str, Any]]:
     )
 
 
+@router.delete("/{model_id}")
+def delete_model(model_id: str) -> dict[str, Any]:
+    """Delete a checkpoint + its cached card. 404 unknown, 409 if protected."""
+    try:
+        deleted = registry.delete_model(model_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f"unknown model: {model_id}")
+    return {"deleted": True, "id": model_id}
+
+
 @router.post("/{model_id}/evaluate")
 def evaluate(model_id: str, mode: str = "quick") -> dict[str, Any]:
     """Run headless rollouts and cache the metrics (slow; on demand only).

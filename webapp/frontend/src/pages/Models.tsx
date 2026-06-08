@@ -174,11 +174,32 @@ function PerOpponentBreakdown({ card }: { card: ModelCard }) {
   );
 }
 
-function ModelCardView({ card: initial }: { card: ModelCard }) {
+function ModelCardView({
+  card: initial,
+  onDeleted,
+}: {
+  card: ModelCard;
+  onDeleted: (id: string) => void;
+}) {
   const [card, setCard] = useState<ModelCard>(initial);
   // Track which mode is currently running ('quick' | 'full' | null).
   const [running, setRunning] = useState<EvalMode | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [confirmDel, setConfirmDel] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+
+  async function remove() {
+    setDeleting(true);
+    setErr(null);
+    try {
+      await api.deleteModel(card.id);
+      onDeleted(card.id);
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : 'delete failed');
+      setDeleting(false);
+      setConfirmDel(false);
+    }
+  }
 
   const wr = winRateFraction(card);
   const selfOut = selfOutFraction(card);
@@ -352,6 +373,65 @@ function ModelCardView({ card: initial }: { card: ModelCard }) {
       >
         sig {card.obs_signature_hash ?? '—'} · {formatTs(card.created_at)}
       </div>
+
+      <div className="mt-2 flex items-center justify-end">
+        {card.protected ? (
+          <span
+            className="micro"
+            style={{ fontSize: 9, color: 'var(--cyan)' }}
+            title="Deployed/canonical model — remove with git if you truly must"
+          >
+            🔒 PROTECTED
+          </span>
+        ) : confirmDel ? (
+          <span className="flex items-center gap-2">
+            <span className="micro text-fg-2" style={{ fontSize: 9 }}>
+              REMOVE THIS MODEL?
+            </span>
+            <button
+              onClick={remove}
+              disabled={deleting}
+              className="micro"
+              style={{
+                fontSize: 9,
+                padding: '2px 7px',
+                borderRadius: 'var(--radius)',
+                border: '1px solid var(--loss)',
+                background: 'var(--bg-2)',
+                color: 'var(--loss)',
+                cursor: deleting ? 'default' : 'pointer',
+              }}
+            >
+              {deleting ? 'REMOVING…' : 'CONFIRM'}
+            </button>
+            <button
+              onClick={() => setConfirmDel(false)}
+              disabled={deleting}
+              className="micro"
+              style={{ fontSize: 9, color: 'var(--fg-2)', cursor: 'pointer' }}
+            >
+              CANCEL
+            </button>
+          </span>
+        ) : (
+          <button
+            onClick={() => setConfirmDel(true)}
+            className="micro"
+            title="Delete this checkpoint from the registry"
+            style={{
+              fontSize: 9,
+              padding: '2px 7px',
+              borderRadius: 'var(--radius)',
+              border: '1px solid var(--line-2)',
+              background: 'transparent',
+              color: 'var(--fg-2)',
+              cursor: 'pointer',
+            }}
+          >
+            REMOVE
+          </button>
+        )}
+      </div>
     </Panel>
   );
 }
@@ -489,7 +569,12 @@ export default function Models() {
       <div className="grid grid-cols-1 gap-5 md:grid-cols-2 xl:grid-cols-3">
         {cards.map((card, i) => (
           <Reveal key={card.id} index={i + 1}>
-            <ModelCardView card={card} />
+            <ModelCardView
+              card={card}
+              onDeleted={(id) =>
+                setCards((prev) => prev?.filter((c) => c.id !== id) ?? prev)
+              }
+            />
           </Reveal>
         ))}
       </div>

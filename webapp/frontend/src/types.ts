@@ -167,6 +167,7 @@ export interface ModelCard {
   obs_signature_hash: string | null;
   metrics: ModelMetrics | null;
   created_at: string;
+  protected?: boolean; // deployed/canonical model — not deletable via the UI
 }
 
 // ---- Training ---------------------------------------------------------------
