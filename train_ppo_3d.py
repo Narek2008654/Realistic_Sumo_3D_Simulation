@@ -256,26 +256,35 @@ def launch_watch(net: "ActorCritic", mult: float):
 # E1f: custom opponents + progress log (only used when a job config is active)
 # ---------------------------------------------------------------------------
 def _build_extra_opponents(custom_opponents):
-    """Build ``{id: () -> DslOpponent}`` factories from a job config's
-    ``custom_opponents`` (each ``{id, behavior_dsl, hardware_spec?}``).
+    """Build ``{id: () -> OpponentController}`` factories from a job config's
+    ``custom_opponents`` (each ``{id, behavior, behavior_dsl?, hardware_spec?}``).
+
+    Each controller is built via the SHARED
+    :func:`opponents.build_controller_from_behavior` factory, so a zoo-behavior
+    custom opponent ("Heavy Dodger") runs the built-in dodger controller and a
+    custom-DSL one runs :class:`DslOpponent` — the zoo-vs-dsl branch lives in
+    one place. A legacy entry with only ``behavior_dsl`` is treated as a dsl
+    behavior. The per-episode chassis is supplied separately via
+    ``_build_extra_opponent_specs``.
 
     Returns None when there are no custom opponents so build_env's
-    ``extra_opponents`` stays unset (byte-identical default path). The DSL is
-    interpreted purely (no eval/exec) by :class:`DslOpponent`. v1: the custom
-    opponent's DSL behavior runs on the STANDARD enemy chassis during training;
-    its saved hardware_spec is not threaded per-episode here (see module note).
+    ``extra_opponents`` stays unset (byte-identical default path). Behaviors are
+    interpreted purely (no eval/exec).
     """
     if not custom_opponents:
         return None
-    from opponents.dsl_runtime import DslOpponent
-    from webapp.shared.opponent_dsl import OpponentDSL
+    from opponents import build_controller_from_behavior
 
     extra = {}
     for c in custom_opponents:
-        dsl = OpponentDSL.from_dict(c["behavior_dsl"])
-        # Bind dsl per-iteration via a default arg so each factory closes over
-        # its OWN opponent (a bare closure would capture the loop variable).
-        extra[c["id"]] = (lambda d=dsl: DslOpponent(d))
+        behavior = c.get("behavior")
+        if behavior is None and "behavior_dsl" in c:  # legacy entry
+            behavior = {"kind": "dsl", "dsl": c["behavior_dsl"]}
+        # Bind behavior per-iteration via a default arg so each factory closes
+        # over its OWN opponent (a bare closure would capture the loop var).
+        extra[c["id"]] = (
+            lambda b=behavior: build_controller_from_behavior(b)
+        )
     return extra
 
 

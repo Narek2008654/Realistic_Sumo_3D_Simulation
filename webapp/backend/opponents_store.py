@@ -3,17 +3,34 @@
 No DB, no auth — every saved opponent is a directory under
 ``data/opponents/<id>/`` holding a single file:
 
-    opponent.json   {id, name, hardware_spec, behavior_dsl, created_at, notes?}
+    opponent.json   {id, name, hardware_spec, behavior, behavior_dsl?,
+                     created_at, notes?}
+
+A saved opponent is BEHAVIOR x HARDWARE: any chassis (a custom HardwareSpec or
+a hardware preset) crossed with any behavior. ``behavior`` is one of two kinds:
+
+    {"kind": "zoo", "zoo_id": "dodger"}   # a built-in zoo controller
+    {"kind": "dsl", "dsl": {rules, default}}  # a user-authored rule DSL
+
+This lets a user save variants like "Heavy Dodger" (the built-in dodger
+behavior on a heavy chassis) or "Fast Novamax" (the novamax behavior on a
+light/fast chassis) alongside fully custom-DSL opponents.
+
+**Back-compat:** a legacy record carrying only ``behavior_dsl`` (and no
+``behavior``) is normalised on read to ``{"kind":"dsl","dsl": behavior_dsl}``.
+New DSL records keep writing ``behavior_dsl`` too (a cheap mirror) so older
+readers — the trainers' run-config bootstrap — keep working unchanged.
 
 The ``<id>`` is a filesystem-safe slug of the opponent's name plus a short
 random suffix, so two opponents saved under the same display name never
 collide. All id handling is path-safe (a single sanitised segment), mirroring
 :mod:`webapp.backend.robots_store`.
 
-Saving validates BOTH the hardware spec (round-tripped through
-:meth:`HardwareSpec.from_dict`) and the behavior DSL (via
-:func:`opponent_dsl.validate`) before writing; either failing raises
-:class:`ValueError` for the router to translate into a 422.
+Saving validates the hardware spec (round-tripped through
+:meth:`HardwareSpec.from_dict`) and the behavior (a ``zoo`` kind must name a
+``zoo_id`` in :data:`opponents.OPPONENT_REGISTRY`; a ``dsl`` kind is checked
+via :func:`opponent_dsl.validate`); either failing raises :class:`ValueError`
+for the router to translate into a 422.
 """
 
 from __future__ import annotations
@@ -34,6 +51,10 @@ __all__ = [
     "list_opponents",
     "get_opponent",
     "delete_opponent",
+    "normalize_behavior",
+    "validate_behavior",
+    "behavior_summary",
+    "build_controller",
 ]
 
 _JSON_NAME = "opponent.json"
@@ -56,6 +77,84 @@ _STANDARD_CHASSIS_NOTE = (
 
 def _iso_now() -> str:
     return datetime.now(tz=timezone.utc).isoformat()
+
+
+# ---------------------------------------------------------------------------
+# Behavior: zoo OR dsl. ONE place decides which — every consumer (battle,
+# training-config resolution, the trainers) builds its controller through
+# ``build_controller`` so the zoo-vs-dsl branch never gets duplicated.
+# ---------------------------------------------------------------------------
+def normalize_behavior(record_or_behavior: Any) -> dict[str, Any]:
+    """Return the canonical ``behavior`` object for a record (or a raw behavior).
+
+    Accepts either a full opponent record or a bare behavior dict. A record
+    that already carries ``behavior`` is returned as-is; a legacy record with
+    only ``behavior_dsl`` is migrated on read to ``{"kind":"dsl","dsl": ...}``.
+    Raises :class:`ValueError` if no behavior can be derived.
+    """
+    if isinstance(record_or_behavior, dict) and "kind" in record_or_behavior:
+        return record_or_behavior  # already a behavior object
+    if isinstance(record_or_behavior, dict):
+        if isinstance(record_or_behavior.get("behavior"), dict):
+            return record_or_behavior["behavior"]
+        if "behavior_dsl" in record_or_behavior:  # legacy migrate-on-read
+            return {"kind": "dsl", "dsl": record_or_behavior["behavior_dsl"]}
+    raise ValueError("record has no behavior (neither 'behavior' nor 'behavior_dsl')")
+
+
+def validate_behavior(behavior: Any) -> list[str]:
+    """Validate a ``behavior`` object, returning human-readable errors (empty
+    == valid). A ``zoo`` behavior must name a known zoo id; a ``dsl`` behavior
+    is validated via :func:`opponent_dsl.validate`."""
+    if not isinstance(behavior, dict) or "kind" not in behavior:
+        return ["behavior must be an object with a 'kind' of 'zoo' or 'dsl'"]
+    kind = behavior.get("kind")
+    if kind == "zoo":
+        zoo_id = behavior.get("zoo_id")
+        # Lazy import: the zoo registry pulls sumo_env.
+        from opponents import OPPONENT_REGISTRY
+
+        if not isinstance(zoo_id, str) or zoo_id not in OPPONENT_REGISTRY:
+            return [
+                f"behavior.zoo_id must be one of {sorted(OPPONENT_REGISTRY)}, "
+                f"got {zoo_id!r}"
+            ]
+        return []
+    if kind == "dsl":
+        return validate(behavior.get("dsl"))
+    return [f"behavior.kind must be 'zoo' or 'dsl', got {kind!r}"]
+
+
+def _canon_behavior(behavior: dict[str, Any]) -> dict[str, Any]:
+    """Canonicalise a (validated) behavior for stable on-disk storage."""
+    if behavior["kind"] == "zoo":
+        return {"kind": "zoo", "zoo_id": behavior["zoo_id"]}
+    return {"kind": "dsl", "dsl": OpponentDSL.from_dict(behavior["dsl"]).to_dict()}
+
+
+def behavior_summary(behavior: dict[str, Any]) -> str:
+    """A short human label for the UI: ``"zoo:dodger"`` / ``"custom rules"``."""
+    if behavior.get("kind") == "zoo":
+        return f"zoo:{behavior.get('zoo_id')}"
+    return "custom rules"
+
+
+def build_controller(record_or_behavior: Any):
+    """The ONE shared factory: build an ``OpponentController`` from a saved
+    opponent record (or a bare behavior object).
+
+    * ``zoo`` -> ``OPPONENT_REGISTRY[zoo_id]()`` (a fresh built-in controller).
+    * ``dsl`` -> ``DslOpponent(OpponentDSL.from_dict(dsl))`` (pure interpreter,
+      no eval/exec).
+
+    Reused by battle, training-config resolution, and the trainers so the
+    zoo-vs-dsl decision lives in exactly one place — the pure
+    :func:`opponents.build_controller_from_behavior` helper this delegates to.
+    """
+    behavior = normalize_behavior(record_or_behavior)
+    from opponents import build_controller_from_behavior
+
+    return build_controller_from_behavior(behavior)
 
 
 def _slugify(name: str) -> str:
@@ -82,13 +181,20 @@ def _new_id(name: str) -> str:
 
 
 def save_opponent(
-    name: str, hardware_spec: dict[str, Any], behavior_dsl: Any
+    name: str,
+    hardware_spec: dict[str, Any],
+    behavior: Any = None,
+    behavior_dsl: Any = None,
 ) -> dict[str, Any]:
-    """Validate + persist a custom opponent, returning its full record.
+    """Validate + persist a custom opponent (BEHAVIOR x HARDWARE), returning
+    its full record.
 
-    ``hardware_spec`` is a plain ``HardwareSpec.to_dict()`` payload;
-    ``behavior_dsl`` is the rule-DSL dict/list. An invalid spec or DSL raises
-    :class:`ValueError` (the router maps this to 422).
+    ``hardware_spec`` is a plain ``HardwareSpec.to_dict()`` payload.
+    ``behavior`` is the new ``{kind:"zoo"|"dsl", ...}`` object. For back-compat
+    a caller may instead pass ``behavior_dsl`` (the rule DSL directly), which
+    is treated as ``{"kind":"dsl","dsl": behavior_dsl}``. Exactly one of the two
+    must be supplied. An invalid spec or behavior raises :class:`ValueError`
+    (the router maps this to 422).
     """
     if not isinstance(name, str) or not name.strip():
         raise ValueError("name must be a non-empty string")
@@ -100,21 +206,31 @@ def save_opponent(
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError(f"invalid HardwareSpec: {exc}") from exc
 
-    dsl_errors = validate(behavior_dsl)
-    if dsl_errors:
-        raise ValueError("invalid behavior_dsl: " + "; ".join(dsl_errors))
-    # Canonicalise the DSL ({rules, default}) so the stored form is stable.
-    canon_dsl = OpponentDSL.from_dict(behavior_dsl).to_dict()
+    # Resolve the behavior from either the new ``behavior`` object or the legacy
+    # ``behavior_dsl`` shorthand (exactly one).
+    if behavior is None and behavior_dsl is not None:
+        behavior = {"kind": "dsl", "dsl": behavior_dsl}
+    if behavior is None:
+        raise ValueError("a behavior (or behavior_dsl) is required")
+
+    errs = validate_behavior(behavior)
+    if errs:
+        raise ValueError("invalid behavior: " + "; ".join(errs))
+    canon_behavior = _canon_behavior(behavior)
 
     opp_id = _new_id(name)
     record = {
         "id": opp_id,
         "name": name.strip(),
         "hardware_spec": spec.to_dict(),
-        "behavior_dsl": canon_dsl,
+        "behavior": canon_behavior,
         "created_at": _iso_now(),
         "notes": _STANDARD_CHASSIS_NOTE,
     }
+    # Cheap mirror: keep writing ``behavior_dsl`` for DSL behaviors so older
+    # readers (the trainers' run-config bootstrap) keep working unchanged.
+    if canon_behavior["kind"] == "dsl":
+        record["behavior_dsl"] = canon_behavior["dsl"]
 
     opp_dir = config.OPPONENTS_DIR / opp_id
     opp_dir.mkdir(parents=True, exist_ok=True)
@@ -131,16 +247,32 @@ def _read_record(opp_id: str) -> dict[str, Any] | None:
     if not path.is_file():
         return None
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        record = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return None
+    # Migrate-on-read: a legacy record (behavior_dsl only) gets a synthesised
+    # ``behavior`` so every consumer sees the new shape. Not persisted here.
+    if isinstance(record, dict) and "behavior" not in record:
+        try:
+            record["behavior"] = normalize_behavior(record)
+        except ValueError:
+            pass
+    return record
 
 
 def _summary(record: dict[str, Any]) -> dict[str, Any]:
+    behavior = record.get("behavior")
+    if behavior is None:
+        try:
+            behavior = normalize_behavior(record)
+        except ValueError:
+            behavior = None
     return {
         "id": record["id"],
         "name": record["name"],
         "created_at": record["created_at"],
+        "behavior": behavior,
+        "behavior_summary": behavior_summary(behavior) if behavior else None,
     }
 
 

@@ -149,7 +149,13 @@ def _resolve_custom_opponents(
     opponent_weights: Optional[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """Resolve the custom (non-zoo) ids in ``opponent_weights`` to their saved
-    records, returning ``[{id, behavior_dsl, hardware_spec}, ...]``.
+    records, returning ``[{id, behavior, behavior_dsl?, hardware_spec}, ...]``.
+
+    ``behavior`` is the zoo|dsl object the trainer builds its controller from
+    via the shared factory, so a "Heavy Dodger" (zoo behavior on a heavy
+    chassis) is sampled with the dodger controller on the heavy body. For
+    back-compat we also carry ``behavior_dsl`` for DSL behaviors so an older
+    trainer build keeps working.
 
     A built-in zoo id is left for the trainer to sample normally. Any id that
     is neither a built-in nor a saved custom opponent raises :class:`JobError`
@@ -178,11 +184,15 @@ def _resolve_custom_opponents(
             w = 0.0
         if w <= 0.0:
             continue  # never sampled — no factory needed
-        out.append({
+        behavior = opponents_store.normalize_behavior(record)
+        entry: dict[str, Any] = {
             "id": record["id"],
-            "behavior_dsl": record["behavior_dsl"],
+            "behavior": behavior,
             "hardware_spec": record.get("hardware_spec"),
-        })
+        }
+        if behavior.get("kind") == "dsl":  # back-compat mirror for old trainers
+            entry["behavior_dsl"] = behavior["dsl"]
+        out.append(entry)
     return out
 
 

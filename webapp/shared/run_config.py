@@ -24,7 +24,10 @@ JSON schema (all keys optional except ``algo`` and ``total_steps``)::
       "seed": 42,
       "start_mult": 3.0 | null,
       "hyperparams": {"lr": 5e-5, "gamma": 0.99, ...},
-      "custom_opponents": [{"id": ..., "behavior_dsl": ..., "hardware_spec"?: ...}]
+      "custom_opponents": [
+        {"id": ..., "behavior": {"kind":"zoo"|"dsl", ...},
+         "behavior_dsl"?: ..., "hardware_spec"?: ...}
+      ]
     }
 
 ``start_mult`` overrides the single-phase curriculum torque-multiplier the
@@ -67,10 +70,12 @@ class TrainingConfig:
     start_mult: Optional[float] = None
     hyperparams: dict[str, Any] = field(default_factory=dict)
     # Custom (user-authored) opponents referenced by ``opponent_weights``. Each
-    # entry is ``{id, behavior_dsl, hardware_spec?}``; the trainer builds a
-    # ``DslOpponent`` factory per id and threads them in as ``extra_opponents``
-    # so custom ids in ``opponent_weights`` get sampled during training. Empty
-    # by default => unset path is byte-identical (no custom opponents).
+    # entry is ``{id, behavior, behavior_dsl?, hardware_spec?}`` where
+    # ``behavior`` is the zoo|dsl object; the trainer builds a controller per id
+    # via the shared factory and threads them in as ``extra_opponents`` so
+    # custom ids in ``opponent_weights`` get sampled during training (on their
+    # own chassis via ``extra_opponent_specs``). Empty by default => unset path
+    # is byte-identical (no custom opponents).
     custom_opponents: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:

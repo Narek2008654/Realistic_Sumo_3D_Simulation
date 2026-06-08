@@ -347,6 +347,11 @@ def _resolve_custom_opponent(
     spec is threaded into the env as ``enemy_hardware_spec`` so the enemy body
     is generated from it and its drive caps come from spec.drivetrain. A note
     is appended recording that the custom hardware is in effect.
+
+    The controller is built through the SHARED ``opponents_store.build_controller``
+    factory, so a zoo-behavior custom opponent (e.g. "Heavy Dodger") runs the
+    built-in controller on its own chassis just as a custom-DSL one does — the
+    zoo-vs-dsl branch lives only in that factory.
     """
     from webapp.backend import opponents_store
 
@@ -354,17 +359,18 @@ def _resolve_custom_opponent(
     if record is None:
         return None  # not a custom id -> let the zoo path validate it.
 
-    from opponents.dsl_runtime import DslOpponent
-    from webapp.shared.opponent_dsl import OpponentDSL
-
-    dsl = OpponentDSL.from_dict(record["behavior_dsl"])
+    behavior = opponents_store.normalize_behavior(record)
     enemy_spec = HardwareSpec.from_dict(record["hardware_spec"])
     notes.append(
         "Custom opponent fights on its own hardware: the enemy chassis, "
         "wheels, wedge, mass and motor caps come from its saved HardwareSpec "
-        "(its behavior_dsl still drives the controller)."
+        f"(its {opponents_store.behavior_summary(behavior)} behavior drives "
+        "the controller)."
     )
-    return {opponent_id: lambda: DslOpponent(dsl)}, enemy_spec
+    return (
+        {opponent_id: lambda b=behavior: opponents_store.build_controller(b)},
+        enemy_spec,
+    )
 
 
 def _gauntlet_opponent_ids(

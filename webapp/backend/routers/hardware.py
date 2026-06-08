@@ -23,6 +23,7 @@ from fastapi import APIRouter, Body, HTTPException
 from webapp.backend import registry
 from webapp.backend.pybullet_lock import pybullet_lock
 from webapp.shared.geometry_export import spec_to_geometry
+from webapp.shared.hardware_presets import list_presets
 from webapp.shared.hardware_spec import HardwareSpec
 from webapp.shared.urdf_gen import generate_urdf
 
@@ -85,6 +86,18 @@ def _urdf_loads_in_pybullet(urdf_str: str) -> tuple[bool, str | None]:
 def default() -> dict[str, Any]:
     """The canonical robot's HardwareSpec as a plain dict (seeds the UI form)."""
     return HardwareSpec.default().to_dict()
+
+
+@router.get("/presets")
+def presets() -> list[dict[str, Any]]:
+    """The hardware-preset library: ``[{id, name, description, hardware_spec}]``.
+
+    Each preset's ``hardware_spec`` round-trips through ``HardwareSpec.from_dict``.
+    A user can cross any preset with any behavior (zoo or DSL) when saving a
+    custom opponent (e.g. the built-in dodger behavior on the ``heavy_rammer``
+    chassis = a "Heavy Dodger").
+    """
+    return list_presets()
 
 
 @router.post("/validate")

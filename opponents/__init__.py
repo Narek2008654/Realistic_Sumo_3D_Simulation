@@ -83,6 +83,31 @@ def make_opponent(name: str):
     return OPPONENT_REGISTRY[name]()
 
 
+def build_controller_from_behavior(behavior: dict):
+    """Build an ``OpponentController`` from a BEHAVIOR object (zoo|dsl).
+
+    The single zoo-vs-dsl branch shared by the web backend's
+    ``opponents_store.build_controller`` and the trainers' custom-opponent
+    bootstrap (so a "Heavy Dodger" runs the dodger controller everywhere). Pure
+    — no eval/exec.
+
+    * ``{"kind":"zoo","zoo_id":<id>}`` -> ``OPPONENT_REGISTRY[zoo_id]()``
+    * ``{"kind":"dsl","dsl":<dsl>}``   -> ``DslOpponent(OpponentDSL.from_dict)``
+    """
+    kind = behavior.get("kind")
+    if kind == "zoo":
+        zoo_id = behavior.get("zoo_id")
+        if zoo_id not in OPPONENT_REGISTRY:
+            raise ValueError(f"unknown zoo_id: {zoo_id!r}")
+        return OPPONENT_REGISTRY[zoo_id]()
+    if kind == "dsl":
+        from opponents.dsl_runtime import DslOpponent
+        from webapp.shared.opponent_dsl import OpponentDSL
+
+        return DslOpponent(OpponentDSL.from_dict(behavior["dsl"]))
+    raise ValueError(f"unknown behavior kind: {kind!r}")
+
+
 def sample_opponent(
     np_random: np.random.Generator,
     weights: dict[str, float] | None = None,
