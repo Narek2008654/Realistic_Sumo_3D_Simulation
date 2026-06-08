@@ -7,45 +7,41 @@
 // position + quaternion under the SAME Z-up (PyBullet/URDF) -> Y-up (three.js)
 // basis used by the builder preview, so the poses read upright and consistent.
 //
-// Geometry is intentionally simple for v1: one box per robot (sized from the
-// agent's HardwareSpec chassis when supplied, else a default block). Agent =
-// forge-orange (--accent), enemy = cyan (--cyan). A console-style transport bar
-// drives play/pause, frame scrub, and 0.5/1/2x speed; the last frame shows the
-// outcome chip (WIN / SELF-OUT / PUSH / TIMEOUT).
+// Each robot is rendered from its FULL `/api/hardware/geometry` primitives
+// (chassis box + front WEDGE + wheels) via the shared RobotMeshes builder — the
+// same one the Hardware preview uses — tinted by side: agent A = forge-orange
+// (--accent), enemy B = cyan (--cyan). A console-style transport bar drives
+// play/pause, frame scrub, and 0.5/1/2x speed; the last frame shows the outcome
+// chip (WIN / SELF-OUT / PUSH / TIMEOUT).
 
 import { Canvas, useFrame } from '@react-three/fiber';
 import { ContactShadows, Environment, Grid, OrbitControls } from '@react-three/drei';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
-import type { HardwareSpec, Trajectory, TrajectoryFrame } from '../types';
+import { api } from '../api';
+import type { Geometry, HardwareSpec, Trajectory, TrajectoryFrame } from '../types';
 import { CornerTicks } from './ui';
+import { RobotMeshes, Z_UP_TO_Y_UP } from './RobotMeshes';
 
 const ACCENT = '#ff7a18';
 const CYAN = '#2ad4ff';
 
-// PyBullet/URDF are Z-up; three.js is Y-up. Rotate the whole replay rig -90deg
-// about X so world poses (z up) stand on the floor — same basis as RobotPreview.
-const Z_UP_TO_Y_UP = new THREE.Euler(-Math.PI / 2, 0, 0);
+// Fallback chassis block (metres) shown only while geometry is still loading —
+// the final render is always the full geometry once it resolves.
+const PLACEHOLDER_BOX: [number, number, number] = [0.1, 0.1, 0.05];
 
-// Default chassis block (metres) when no spec is available — a readable puck.
-const DEFAULT_BOX: [number, number, number] = [0.1, 0.1, 0.05];
-
-function chassisBox(spec?: HardwareSpec | null): [number, number, number] {
-  if (!spec) return DEFAULT_BOX;
-  const c = spec.chassis;
-  return [c.length_m, c.width_m, c.height_m];
-}
-
-/** One robot rendered as a chassis box, positioned by interpolated pose. The
- *  box is centred on the chassis mid-height so it sits on the floor (PyBullet
- *  base pose is the body origin; z is the body centre). */
+/** One robot, moved per frame by the trajectory pose (raw world Z-up coords —
+ *  it lives inside the Z-up→Y-up group). Renders the full geometry (chassis +
+ *  wedge + wheels) tinted by side once `geom` resolves; until then a light
+ *  placeholder box keeps the stage populated. Meshes are built once per geom
+ *  (RobotMeshes memoises the kinematic walk), not per frame. */
 function Robot({
   pose,
-  size,
+  geom,
   color,
 }: {
   pose: { p: THREE.Vector3; q: THREE.Quaternion };
-  size: [number, number, number];
+  geom: Geometry | null;
   color: string;
 }) {
   const ref = useRef<THREE.Group>(null);
@@ -57,26 +53,20 @@ function Robot({
   });
   return (
     <group ref={ref}>
-      <mesh castShadow>
-        <boxGeometry args={size} />
-        <meshStandardMaterial
-          color={color}
-          emissive={color}
-          emissiveIntensity={0.32}
-          metalness={0.35}
-          roughness={0.5}
-        />
-      </mesh>
-      {/* faint emissive rim cage for the instrument look */}
-      <mesh>
-        <boxGeometry args={[size[0] * 1.02, size[1] * 1.02, size[2] * 1.02]} />
-        <meshBasicMaterial color={color} wireframe transparent opacity={0.25} />
-      </mesh>
-      {/* heading tick: a small nub on +X (body forward) */}
-      <mesh position={[size[0] / 2 + 0.012, 0, 0]}>
-        <coneGeometry args={[0.012, 0.024, 8]} />
-        <meshBasicMaterial color={color} />
-      </mesh>
+      {geom ? (
+        <RobotMeshes geom={geom} tint={color} />
+      ) : (
+        <mesh castShadow>
+          <boxGeometry args={PLACEHOLDER_BOX} />
+          <meshStandardMaterial
+            color={color}
+            emissive={color}
+            emissiveIntensity={0.32}
+            metalness={0.35}
+            roughness={0.5}
+          />
+        </mesh>
+      )}
     </group>
   );
 }
@@ -114,18 +104,18 @@ function framePoses(frame: TrajectoryFrame) {
 
 function Scene({
   traj,
-  agentSize,
+  agentGeom,
+  enemyGeom,
   frameIndex,
 }: {
   traj: Trajectory;
-  agentSize: [number, number, number];
+  agentGeom: Geometry | null;
+  enemyGeom: Geometry | null;
   frameIndex: number;
 }) {
   const radius = traj.dohyo_radius || 0.35;
   const i = Math.max(0, Math.min(traj.frames.length - 1, Math.round(frameIndex)));
   const poses = useMemo(() => framePoses(traj.frames[i]), [traj, i]);
-  // Enemy uses a default block (we don't carry the opponent's spec here).
-  const enemySize = DEFAULT_BOX;
 
   return (
     <>
@@ -154,8 +144,8 @@ function Scene({
       <Dohyo radius={radius} />
 
       <group rotation={Z_UP_TO_Y_UP}>
-        <Robot pose={poses.agent} size={agentSize} color={ACCENT} />
-        <Robot pose={poses.enemy} size={enemySize} color={CYAN} />
+        <Robot pose={poses.agent} geom={agentGeom} color={ACCENT} />
+        <Robot pose={poses.enemy} geom={enemyGeom} color={CYAN} />
       </group>
 
       <ContactShadows position={[0, 0, 0]} opacity={0.5} scale={radius * 3} blur={2.4} far={0.5} />
@@ -186,13 +176,69 @@ function outcomeChip(reason: string) {
 
 const SPEEDS = [0.5, 1, 2] as const;
 
+// Module-level geometry cache, keyed by the spec's serialised identity. The
+// same default spec (and repeated battles on one chassis) resolve to one fetch
+// for the whole session, so geometry is never refetched per render or per frame.
+const geomCache = new Map<string, Promise<Geometry>>();
+
+function fetchGeometry(spec: HardwareSpec): Promise<Geometry> {
+  const key = JSON.stringify(spec);
+  let p = geomCache.get(key);
+  if (!p) {
+    p = api.geometry(spec);
+    geomCache.set(key, p);
+  }
+  return p;
+}
+
+/** Resolve a side's geometry: use the explicit spec when given, else the cached
+ *  default spec. Returns null until it loads (the caller shows a placeholder).
+ *  Cached across renders, so the fetch happens once per distinct spec. */
+function useSideGeometry(spec: HardwareSpec | null | undefined): Geometry | null {
+  const [defaultSpec, setDefaultSpec] = useState<HardwareSpec | null>(null);
+  const [geom, setGeom] = useState<Geometry | null>(null);
+
+  // Fetch the default spec once (shared fallback for both sides).
+  useEffect(() => {
+    let alive = true;
+    api
+      .hardwareDefault()
+      .then((s) => alive && setDefaultSpec(s))
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const effective = spec ?? defaultSpec;
+  const key = effective ? JSON.stringify(effective) : null;
+
+  useEffect(() => {
+    if (!effective) return;
+    let alive = true;
+    setGeom(null);
+    fetchGeometry(effective)
+      .then((g) => alive && setGeom(g))
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+    // key captures the spec identity; effective is derived from it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key]);
+
+  return geom;
+}
+
 export function TrajectoryPlayer({
   traj,
   agentSpec,
+  opponentSpec,
   label,
 }: {
   traj: Trajectory | null;
   agentSpec?: HardwareSpec | null;
+  opponentSpec?: HardwareSpec | null;
   label?: string;
 }) {
   const [frame, setFrame] = useState(0);
@@ -202,7 +248,8 @@ export function TrajectoryPlayer({
   const nFrames = traj?.frames.length ?? 0;
   const lastFrame = Math.max(0, nFrames - 1);
   const dt = traj?.dt || 0.05;
-  const agentSize = useMemo(() => chassisBox(agentSpec), [agentSpec]);
+  const agentGeom = useSideGeometry(agentSpec);
+  const enemyGeom = useSideGeometry(opponentSpec);
 
   // Reset transport when a new trajectory loads (powering-on micro-moment).
   useEffect(() => {
@@ -307,7 +354,14 @@ export function TrajectoryPlayer({
           background: 'radial-gradient(circle at 50% 42%, #0c1118, #080b0f 75%)',
         }}
       >
-        {traj && <Scene traj={traj} agentSize={agentSize} frameIndex={frame} />}
+        {traj && (
+          <Scene
+            traj={traj}
+            agentGeom={agentGeom}
+            enemyGeom={enemyGeom}
+            frameIndex={frame}
+          />
+        )}
       </Canvas>
 
       {/* Transport bar */}

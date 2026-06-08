@@ -24,7 +24,6 @@ import * as THREE from 'three';
 import type {
   DistanceSensor,
   Geometry,
-  GeomLink,
   HardwareSpec,
   LineSensor,
   PreviewView,
@@ -32,6 +31,7 @@ import type {
 } from '../types';
 import { CornerTicks } from './ui';
 import { Info } from './Info';
+import { RobotMeshes, Z_UP_TO_Y_UP } from './RobotMeshes';
 
 const ACCENT = '#ff7a18';
 const CYAN = '#2ad4ff';
@@ -39,126 +39,10 @@ const CYAN = '#2ad4ff';
 // line cyan. A bright magenta reads clearly against the dark stage + orange rig.
 const COM = '#ff3df0';
 
-// URDF/PyBullet are Z-up; three.js is Y-up. We rotate the whole rig -90deg
-// about X so the robot stands on the floor and reads naturally. Sensor overlays
-// live INSIDE the same rotated group, so spec body-frame coords (x fwd / y left
-// / z up) line up with the chassis automatically.
-const Z_UP_TO_Y_UP = new THREE.Euler(-Math.PI / 2, 0, 0);
-
-/** Local transform of a joint/visual origin (xyz + rpy euler, URDF order). */
-function originMatrix(xyz: Vec3, rpy: Vec3): THREE.Matrix4 {
-  const m = new THREE.Matrix4();
-  const q = new THREE.Quaternion().setFromEuler(
-    new THREE.Euler(rpy[0], rpy[1], rpy[2], 'XYZ'),
-  );
-  m.compose(
-    new THREE.Vector3(xyz[0], xyz[1], xyz[2]),
-    q,
-    new THREE.Vector3(1, 1, 1),
-  );
-  return m;
-}
-
-interface PlacedLink {
-  link: GeomLink;
-  frame: THREE.Matrix4;
-}
-
-/**
- * Resolve each link's frame by walking joints from the base link. Links not
- * reachable via a joint (e.g. the base itself) get identity.
- */
-function placeLinks(geom: Geometry): PlacedLink[] {
-  const childToJoint = new Map(
-    geom.joints.filter((j) => j.child).map((j) => [j.child as string, j]),
-  );
-
-  const cache = new Map<string, THREE.Matrix4>();
-  function frameOf(linkName: string): THREE.Matrix4 {
-    const hit = cache.get(linkName);
-    if (hit) return hit;
-    const joint = childToJoint.get(linkName);
-    let frame: THREE.Matrix4;
-    if (!joint || !joint.parent) {
-      frame = new THREE.Matrix4();
-    } else {
-      const parent = frameOf(joint.parent);
-      frame = parent
-        .clone()
-        .multiply(originMatrix(joint.origin_xyz, joint.origin_rpy));
-    }
-    cache.set(linkName, frame);
-    return frame;
-  }
-
-  return geom.links.map((link) => ({ link, frame: frameOf(link.name) }));
-}
-
-function isChassis(name: string): boolean {
-  const n = name.toLowerCase();
-  return n.includes('base') || n.includes('chassis') || n.includes('wedge');
-}
-
-function LinkMesh({ placed }: { placed: PlacedLink }) {
-  const { link, frame } = placed;
-
-  const { position, quaternion } = useMemo(() => {
-    const world = frame
-      .clone()
-      .multiply(originMatrix(link.origin_xyz, link.origin_rpy));
-    const pos = new THREE.Vector3();
-    const quat = new THREE.Quaternion();
-    const scl = new THREE.Vector3();
-    world.decompose(pos, quat, scl);
-    return { position: pos, quaternion: quat };
-  }, [frame, link.origin_xyz, link.origin_rpy]);
-
-  const color = isChassis(link.name)
-    ? ACCENT
-    : new THREE.Color(link.rgba[0], link.rgba[1], link.rgba[2]).getStyle();
-  const emissive = isChassis(link.name) ? ACCENT : '#0a0d11';
-
-  const geometryNode = useMemo(() => {
-    if (link.shape === 'box' && link.size) {
-      return <boxGeometry args={link.size} />;
-    }
-    if (link.shape === 'cylinder') {
-      return (
-        <cylinderGeometry
-          args={[
-            link.radius ?? 0.01,
-            link.radius ?? 0.01,
-            link.length ?? 0.01,
-            28,
-          ]}
-        />
-      );
-    }
-    if (link.shape === 'sphere') {
-      return <sphereGeometry args={[link.radius ?? 0.01, 24, 16]} />;
-    }
-    return null;
-  }, [link]);
-
-  if (!geometryNode) return null;
-
-  const cylFix = link.shape === 'cylinder';
-
-  return (
-    <group position={position} quaternion={quaternion}>
-      <mesh rotation={cylFix ? [Math.PI / 2, 0, 0] : undefined} castShadow>
-        {geometryNode}
-        <meshStandardMaterial
-          color={color}
-          emissive={emissive}
-          emissiveIntensity={isChassis(link.name) ? 0.35 : 0.05}
-          metalness={0.35}
-          roughness={0.55}
-        />
-      </mesh>
-    </group>
-  );
-}
+// Z-up→Y-up rig basis + the link-mesh builder live in RobotMeshes (shared with
+// the Arena/Opponents replay). Sensor overlays below live INSIDE the same
+// rotated group, so spec body-frame coords (x fwd / y left / z up) line up with
+// the chassis automatically.
 
 /** One ToF sensor: a marker at its mount + a direction ray of length range_m.
  * The ray is a thin cylinder (robust across r3f/three) lying in the body XY
@@ -312,7 +196,6 @@ function Scene({
   spec: HardwareSpec | null;
   underside: boolean;
 }) {
-  const placed = useMemo(() => placeLinks(geom), [geom]);
   const radius = spec?.dohyo.radius_m ?? 0.35;
   const border = spec?.dohyo.border_width_m ?? 0.025;
   // Underside marker height: just under the chassis (slightly below z=0 floor
@@ -355,9 +238,7 @@ function Scene({
 
       {/* Z-up (URDF) -> Y-up (three) rotation for the whole rig + overlays. */}
       <group rotation={Z_UP_TO_Y_UP}>
-        {placed.map((p) => (
-          <LinkMesh key={p.link.name} placed={p} />
-        ))}
+        <RobotMeshes geom={geom} />
 
         {spec?.distance_sensors.map((s, i) => (
           <DistanceSensorViz key={`tof-${s.id}-${i}`} sensor={s} />

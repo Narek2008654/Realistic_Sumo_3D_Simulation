@@ -165,7 +165,6 @@ def _record_match(env_u, net_a, net_b, max_steps: int = 600):
     import pybullet as p
     from sumo_env import (
         DISCRETE_ACTION_MAP, SUBSTEPS_PER_STEP, FALL_Z, STEP_DT_SECONDS,
-        DOHYO_RADIUS,
     )
     from scripts.agent_vs_agent import fresh_state, robot_obs, drive
 
@@ -217,7 +216,9 @@ def _record_match(env_u, net_a, net_b, max_steps: int = 600):
 
     trajectory = {
         "dt": float(STEP_DT_SECONDS),
-        "dohyo_radius": float(DOHYO_RADIUS),
+        # Actual ring size for this battle (side A's spec), so a resized dohyo
+        # replays at the right size — not the module default.
+        "dohyo_radius": float(env_u.hw_spec.dohyo.radius_m),
         "frames": frames,
         "outcome": out,
     }

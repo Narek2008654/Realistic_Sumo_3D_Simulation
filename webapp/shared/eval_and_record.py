@@ -58,7 +58,7 @@ def _record_trajectory(env, model, max_steps: int = 600) -> dict:
     frontend's job.
     """
     import pybullet as p
-    from sumo_env import STEP_DT_SECONDS, DOHYO_RADIUS
+    from sumo_env import STEP_DT_SECONDS
 
     base = env.unwrapped
 
@@ -86,7 +86,9 @@ def _record_trajectory(env, model, max_steps: int = 600) -> dict:
     )
     return {
         "dt": float(STEP_DT_SECONDS),
-        "dohyo_radius": float(DOHYO_RADIUS),
+        # Actual ring size from the env's spec, so a resized dohyo replays at
+        # the right size rather than the module default.
+        "dohyo_radius": float(base.hw_spec.dohyo.radius_m),
         "frames": frames,
         "outcome": {"winner": winner, "reason": reason},
     }
