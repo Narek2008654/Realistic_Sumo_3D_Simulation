@@ -201,6 +201,12 @@ _HW_SPEC = None
 # ``extra_opponents`` so custom ids in ``opponent_weights`` get sampled. None
 # on the unset path (default training is byte-identical).
 _EXTRA_OPPONENTS = None
+# add/ui-local: per-episode custom enemy HARDWARE ({id: HardwareSpec}) built
+# from the job config's custom_opponents that carry a ``hardware_spec``.
+# Threaded into build_env as ``extra_opponent_specs`` so that when such a
+# custom opponent is sampled for an episode, the enemy spawns on ITS chassis +
+# motors. None on the unset path (default training is byte-identical).
+_EXTRA_OPPONENT_SPECS = None
 
 HERE = HERE_TOP
 OUTPUT_DIR = HERE / "checkpoints" / "dqn_intermediate"
@@ -655,6 +661,28 @@ def _build_extra_opponents(custom_opponents):
     return extra
 
 
+def _build_extra_opponent_specs(custom_opponents):
+    """Build ``{id: HardwareSpec}`` from a job config's ``custom_opponents``,
+    one entry per opponent that carries a ``hardware_spec``.
+
+    Threaded into build_env as ``extra_opponent_specs`` so that when such a
+    custom opponent is sampled for a TRAINING episode, the enemy spawns on
+    THAT opponent's own chassis + motors. Returns None when no custom opponent
+    has a spec, so build_env's ``extra_opponent_specs`` stays unset and the
+    default training path is byte-identical.
+    """
+    if not custom_opponents:
+        return None
+    from webapp.shared.hardware_spec import HardwareSpec
+
+    specs = {}
+    for c in custom_opponents:
+        hw = c.get("hardware_spec")
+        if hw:
+            specs[c["id"]] = HardwareSpec.from_dict(hw)
+    return specs or None
+
+
 def _append_progress_log(job_dir, **fields):
     """Atomically append one ``{"t":"log", ...}`` line to ``progress.jsonl``.
 
@@ -713,6 +741,10 @@ def online_finetune(
         # extra factories so they get sampled during the online phase.
         **({"hardware_spec": _HW_SPEC} if _HW_SPEC is not None else {}),
         **({"extra_opponents": _EXTRA_OPPONENTS} if _EXTRA_OPPONENTS else {}),
+        # add/ui-local: per-episode custom enemy hardware. When a sampled
+        # custom opponent carries its own spec, the enemy fights on that body.
+        **({"extra_opponent_specs": _EXTRA_OPPONENT_SPECS}
+           if _EXTRA_OPPONENT_SPECS else {}),
     )
     buffer = NStepReplayBuffer(REPLAY_CAPACITY, GAMMA, N_STEP)
     opt = torch.optim.Adam(online.parameters(), lr=ONLINE_LR)
@@ -894,7 +926,7 @@ def main() -> None:
     # load the job config and override the module constants the job controls.
     _rc = os.environ.get("SUMO_RUN_CONFIG")
     if _rc:
-        global _RUN_CFG, _HW_SPEC, EVAL_EVERY, _EXTRA_OPPONENTS
+        global _RUN_CFG, _HW_SPEC, EVAL_EVERY, _EXTRA_OPPONENTS, _EXTRA_OPPONENT_SPECS
         global ONLINE_TIMESTEPS_PER_PHASE, FINETUNE_PHASES
         global BEST_PATH, FINAL_PATH, RESUME_CHECKPOINT_PATH, CONTINUE_TRAINING
         global CONTINUE_BEST_PATH, CONTINUE_FINAL_PATH
@@ -906,6 +938,7 @@ def main() -> None:
         _HW_SPEC = cfg.hardware_spec
         EVAL_EVERY = cfg.eval_every
         _EXTRA_OPPONENTS = _build_extra_opponents(cfg.custom_opponents)
+        _EXTRA_OPPONENT_SPECS = _build_extra_opponent_specs(cfg.custom_opponents)
         cfg.eval_every = cfg.eval_every  # (kept on cfg for the hook)
 
         # Hyperparam overrides from the job config. Each key maps onto its

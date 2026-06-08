@@ -597,6 +597,7 @@ class MiniSumoEnv(gym.Env):
         hardware_spec: Optional[HardwareSpec] = None,
         enemy_hardware_spec: Optional[HardwareSpec] = None,
         extra_opponents: Optional[dict] = None,
+        extra_opponent_specs: Optional[dict] = None,
     ) -> None:
         super().__init__()
         # E1b: the robot's sensing + observation contract is driven by a
@@ -704,6 +705,27 @@ class MiniSumoEnv(gym.Env):
         # in close(). Only allocated when enemy_hw_spec is provided.
         self._enemy_urdf_tmpdir = None
         self._enemy_urdf_path: Optional[str] = None
+        # add/ui-local: PER-EPISODE custom enemy hardware for TRAINING. Maps a
+        # custom opponent id -> the HardwareSpec the enemy spawns on when THAT
+        # opponent is the episode's opponent. None (default) => behaviour is
+        # byte-identical to today (the enemy spawns/drives exactly as the
+        # single-spec / novamax path; audit stays green). Built-in zoo ids (no
+        # entry here) spawn the enemy exactly as today. Each custom spec's URDF
+        # is generated + CACHED once below (id -> temp path) so resets only
+        # removeBody+loadURDF, never regenerate URDF text.
+        self.extra_opponent_specs: Optional[dict] = (
+            dict(extra_opponent_specs) if extra_opponent_specs else None
+        )
+        # Lazy cache: custom opponent id -> generated URDF path. The backing
+        # TemporaryDirectory objects are held in _enemy_spec_tmpdirs and all
+        # cleaned up in close().
+        self._enemy_spec_urdf_cache: dict[str, str] = {}
+        self._enemy_spec_tmpdirs: list = []
+        # The HardwareSpec the enemy is fighting on for the CURRENT episode
+        # (set in reset()): the per-episode custom spec when the sampled
+        # opponent has one, else the single-battle enemy_hw_spec, else None
+        # (novamax / agent chassis). Drives _novamax_caps() + base mass.
+        self._active_enemy_spec: Optional[HardwareSpec] = enemy_hardware_spec
         # When True, the blue robot is driven by keyboard (WASD / arrows)
         # instead of the NovamaxController. Requires gui=True.
         self.human_enemy = bool(human_enemy)
@@ -1038,6 +1060,43 @@ class MiniSumoEnv(gym.Env):
         cid = ids[idx]
         return cid, extra[cid]()
 
+    def _select_opponent(self) -> None:
+        """Draw this episode's opponent id + controller into
+        ``self._opponent_id`` / ``self._enemy_ctrl`` — exactly ONCE per reset.
+
+        Factored out of reset() so the per-episode custom-hardware path can
+        pick the opponent BEFORE spawning the enemy body (to choose the body)
+        while the legacy call-site at the end of the spawn block reuses the
+        result instead of re-drawing. The ``_opponent_selected`` guard makes
+        the second call a no-op, so the RNG-draw sequence is unchanged versus
+        the single-call baseline.
+        """
+        if getattr(self, "_opponent_selected", False):
+            return
+        from opponents import make_opponent, sample_opponent
+        extra = self.extra_opponents
+        if self.force_opponent_id is not None:
+            self._opponent_id = self.force_opponent_id
+            # Prefer a user-authored factory when the pinned id is custom;
+            # fall back to the built-in zoo otherwise (default path unchanged).
+            if extra is not None and self._opponent_id in extra:
+                self._enemy_ctrl = extra[self._opponent_id]()
+            else:
+                self._enemy_ctrl = make_opponent(self._opponent_id)
+        elif extra:
+            # Merge custom factories into the weighted draw. Built-in ids keep
+            # their OPPONENT_WEIGHTS; custom ids only participate when given a
+            # positive weight in opponent_weights (default 0 => never sampled),
+            # so adding factories alone does not change the zoo distribution.
+            self._opponent_id, self._enemy_ctrl = self._sample_with_extra(
+                sample_opponent, extra,
+            )
+        else:
+            self._opponent_id, self._enemy_ctrl = sample_opponent(
+                self._np_random, self.opponent_weights,
+            )
+        self._opponent_selected = True
+
     def _ensure_enemy_urdf(self, spec: HardwareSpec) -> str:
         """Generate (once) a URDF for the custom-hardware enemy and return its
         path. The file lives in a per-env temp dir cleaned up in close().
@@ -1056,6 +1115,29 @@ class MiniSumoEnv(gym.Env):
         path = os.path.join(self._enemy_urdf_tmpdir.name, "enemy.urdf")
         write_urdf(spec, path)
         self._enemy_urdf_path = path
+        return path
+
+    def _ensure_custom_opponent_urdf(self, opp_id: str, spec: HardwareSpec) -> str:
+        """Generate (ONCE per custom opponent id) a URDF for that opponent's
+        own hardware and return its cached path.
+
+        add/ui-local: used by the per-episode custom-enemy path. The URDF text
+        is written exactly once into a dedicated temp dir; subsequent episodes
+        with the same opponent id reuse the cached path (only removeBody +
+        loadURDF happen per reset, never URDF regeneration). All temp dirs are
+        held in ``self._enemy_spec_tmpdirs`` and cleaned up in close().
+        """
+        cached = self._enemy_spec_urdf_cache.get(opp_id)
+        if cached is not None:
+            return cached
+        import tempfile
+        from webapp.shared.urdf_gen import write_urdf
+
+        tmpdir = tempfile.TemporaryDirectory(prefix=f"sumo_opp_{opp_id}_urdf_")
+        self._enemy_spec_tmpdirs.append(tmpdir)
+        path = os.path.join(tmpdir.name, "enemy.urdf")
+        write_urdf(spec, path)
+        self._enemy_spec_urdf_cache[opp_id] = path
         return path
 
     def _novamax_caps(self) -> tuple[float, float]:
@@ -1079,8 +1161,8 @@ class MiniSumoEnv(gym.Env):
             max_rad ≈ 35.6 rad/s (~340 RPM)
             max_force ≈ 0.063 N·m (~53% of agent's 0.12 N·m)
         """
-        if self.enemy_hw_spec is not None:
-            dt = self.enemy_hw_spec.drivetrain
+        if self._active_enemy_spec is not None:
+            dt = self._active_enemy_spec.drivetrain
             max_rad = max(1.0, float(dt.max_omega_rad_s))
             max_force = max(0.01, float(dt.max_torque_nm))
             return max_rad * self._velocity_factor, max_force
@@ -1519,6 +1601,11 @@ class MiniSumoEnv(gym.Env):
         if seed is not None:
             self._np_random = np.random.default_rng(seed)
 
+        # add/ui-local: per-reset guard so _select_opponent() draws exactly
+        # ONCE (the per-episode custom-hardware path calls it early to pick the
+        # body; the legacy call-site then reuses the result).
+        self._opponent_selected = False
+
         p.resetSimulation()
         p.setGravity(0.0, 0.0, -9.81)
         p.setTimeStep(SIM_TIMESTEP)
@@ -1663,8 +1750,31 @@ class MiniSumoEnv(gym.Env):
         # over the chassis-DR knobs. The mass comes from the spec (the heavy
         # chassis stays heavy); the NOVAMAX-style enemy mass-DR is skipped so
         # the custom body's physical identity is preserved.
-        if self.enemy_hw_spec is not None:
-            enemy_urdf = self._ensure_enemy_urdf(self.enemy_hw_spec)
+        #
+        # PER-EPISODE custom hardware (TRAINING): when extra_opponent_specs is
+        # set, the opponent is selected FIRST (here, gated so the default
+        # RNG-draw order is untouched), so the enemy body for this episode can
+        # be THAT opponent's own chassis/motors. _select_opponent() performs
+        # the same draw the legacy block below would, and caches its result so
+        # that block does not re-draw. self._active_enemy_spec is then the
+        # per-episode custom spec (or enemy_hw_spec, or None).
+        self._active_enemy_spec = self.enemy_hw_spec
+        if self.extra_opponent_specs is not None:
+            self._select_opponent()
+            ep_spec = self.extra_opponent_specs.get(self._opponent_id)
+            if ep_spec is not None:
+                self._active_enemy_spec = ep_spec
+
+        if self._active_enemy_spec is not None:
+            # Spawn on the active spec's body. For the per-episode path this
+            # is the sampled opponent's cached URDF; for the single-battle
+            # path it stays the enemy_hw_spec URDF (unchanged).
+            if self._active_enemy_spec is self.enemy_hw_spec:
+                enemy_urdf = self._ensure_enemy_urdf(self.enemy_hw_spec)
+            else:
+                enemy_urdf = self._ensure_custom_opponent_urdf(
+                    self._opponent_id, self._active_enemy_spec,
+                )
         else:
             use_agent_chassis = self.enemy_as_agent or (
                 self.enemy_chassis_dr and self._np_random.random() < 0.5)
@@ -1674,11 +1784,11 @@ class MiniSumoEnv(gym.Env):
         )
         self._enemy_left_idx = enemy_joints["left_wheel_joint"]
         self._enemy_right_idx = enemy_joints["right_wheel_joint"]
-        if self.enemy_hw_spec is not None:
+        if self._active_enemy_spec is not None:
             # Keep the spec's true base mass (no DR jitter) so the custom
             # chassis's push/inertia matches what the user designed.
             p.changeDynamics(
-                self.enemy_id, -1, mass=self.enemy_hw_spec.chassis.mass_kg,
+                self.enemy_id, -1, mass=self._active_enemy_spec.chassis.mass_kg,
             )
         else:
             enemy_mass_mult = float(self._np_random.uniform(*DR_MASS_RANGE))
@@ -1688,31 +1798,9 @@ class MiniSumoEnv(gym.Env):
 
         # Step 8: draw a fresh opponent from the zoo each episode (or
         # honour `force_opponent_id` when the eval / debugging caller
-        # has pinned a specific controller). Lazy-imported here so this
-        # module can finish loading first (opponents/__init__.py imports
-        # NovamaxController back from us).
-        from opponents import make_opponent, sample_opponent
-        extra = self.extra_opponents
-        if self.force_opponent_id is not None:
-            self._opponent_id = self.force_opponent_id
-            # Prefer a user-authored factory when the pinned id is custom;
-            # fall back to the built-in zoo otherwise (default path unchanged).
-            if extra is not None and self._opponent_id in extra:
-                self._enemy_ctrl = extra[self._opponent_id]()
-            else:
-                self._enemy_ctrl = make_opponent(self._opponent_id)
-        elif extra:
-            # Merge custom factories into the weighted draw. Built-in ids keep
-            # their OPPONENT_WEIGHTS; custom ids only participate when given a
-            # positive weight in opponent_weights (default 0 => never sampled),
-            # so adding factories alone does not change the zoo distribution.
-            self._opponent_id, self._enemy_ctrl = self._sample_with_extra(
-                sample_opponent, extra,
-            )
-        else:
-            self._opponent_id, self._enemy_ctrl = sample_opponent(
-                self._np_random, self.opponent_weights,
-            )
+        # has pinned a specific controller). When the per-episode custom
+        # path above already selected the opponent, this is a no-op reuse.
+        self._select_opponent()
         self._enemy_ctrl.reset()
 
         self.last_seen_dir = 0.0
@@ -2227,3 +2315,11 @@ class MiniSumoEnv(gym.Env):
                 pass
             self._enemy_urdf_tmpdir = None
             self._enemy_urdf_path = None
+        # add/ui-local: drop every per-episode custom-opponent URDF temp dir.
+        for tmpdir in self._enemy_spec_tmpdirs:
+            try:
+                tmpdir.cleanup()
+            except OSError:  # pragma: no cover - best-effort cleanup
+                pass
+        self._enemy_spec_tmpdirs = []
+        self._enemy_spec_urdf_cache = {}

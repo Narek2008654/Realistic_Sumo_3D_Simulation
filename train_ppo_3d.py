@@ -90,6 +90,11 @@ _HW_SPEC = None
 # config's ``custom_opponents``; passed into build_env as ``extra_opponents``
 # so custom ids in ``opponent_weights`` get sampled. None on the unset path.
 _EXTRA_OPPONENTS = None
+# add/ui-local: per-episode custom enemy HARDWARE ({id: HardwareSpec}) built
+# from custom_opponents that carry a ``hardware_spec``; passed into build_env
+# as ``extra_opponent_specs`` so when such an opponent is sampled the enemy
+# spawns on ITS chassis + motors. None on the unset path (byte-identical).
+_EXTRA_OPPONENT_SPECS = None
 
 # Human-in-the-loop: every WATCH_EVERY steps, pop a GUI window playing the
 # CURRENT policy at the current curriculum mult (non-blocking — training
@@ -274,6 +279,27 @@ def _build_extra_opponents(custom_opponents):
     return extra
 
 
+def _build_extra_opponent_specs(custom_opponents):
+    """Build ``{id: HardwareSpec}`` from a job config's ``custom_opponents``,
+    one entry per opponent that carries a ``hardware_spec``.
+
+    Passed into build_env as ``extra_opponent_specs`` so that when such a
+    custom opponent is sampled for a TRAINING episode, the enemy spawns on
+    THAT opponent's own chassis + motors. Returns None when no custom opponent
+    has a spec so the default training path stays byte-identical.
+    """
+    if not custom_opponents:
+        return None
+    from webapp.shared.hardware_spec import HardwareSpec
+
+    specs = {}
+    for c in custom_opponents:
+        hw = c.get("hardware_spec")
+        if hw:
+            specs[c["id"]] = HardwareSpec.from_dict(hw)
+    return specs or None
+
+
 def _append_progress_log(job_dir, **fields):
     """Atomically append one ``{"t":"log", ...}`` line to ``progress.jsonl``.
 
@@ -311,7 +337,7 @@ def train():
     _opp_weights = None
     if _rc:
         global _RUN_CFG, _HW_SPEC, EVAL_EVERY, TOTAL_STEPS, MULT_PHASES
-        global BEST_PATH, FINAL_PATH, RESUME, _EXTRA_OPPONENTS
+        global BEST_PATH, FINAL_PATH, RESUME, _EXTRA_OPPONENTS, _EXTRA_OPPONENT_SPECS
         global LR, GAMMA, ENT_COEF, CLIP, NET_ARCH
         from webapp.shared import run_config, checkpoint_hook as _ch
         globals()["checkpoint_hook"] = _ch
@@ -321,6 +347,7 @@ def train():
         EVAL_EVERY = cfg.eval_every
         _opp_weights = cfg.opponent_weights
         _EXTRA_OPPONENTS = _build_extra_opponents(cfg.custom_opponents)
+        _EXTRA_OPPONENT_SPECS = _build_extra_opponent_specs(cfg.custom_opponents)
 
         # Hyperparam overrides from the job config. Each key maps onto its
         # matching module constant; absent keys leave the default untouched.
@@ -405,6 +432,10 @@ def train():
         **({"opponent_weights": _opp_weights} if _opp_weights else {}),
         **({"hardware_spec": _HW_SPEC} if _HW_SPEC is not None else {}),
         **({"extra_opponents": _EXTRA_OPPONENTS} if _EXTRA_OPPONENTS else {}),
+        # add/ui-local: per-episode custom enemy hardware. When a sampled
+        # custom opponent carries its own spec, the enemy fights on that body.
+        **({"extra_opponent_specs": _EXTRA_OPPONENT_SPECS}
+           if _EXTRA_OPPONENT_SPECS else {}),
     )
 
     net = ActorCritic(NET_OBS_DIM, N_ACTIONS, hidden=NET_ARCH)
