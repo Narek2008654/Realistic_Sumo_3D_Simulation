@@ -1,29 +1,37 @@
-// OPPONENTS — author custom rule-DSL opponents, list/delete them, test one in a
-// tiny battle, and make them selectable in the Arena (via the side-B picker).
+// OPPONENTS — author custom opponents in two stages (build the FULL HARDWARE,
+// then the behaviour LOGIC), list/delete them, test one in a tiny battle, and
+// make them selectable in the Arena (via the side-B picker).
 //
 // Two columns:
-//  • LEFT  — CREATE panel: a rule builder (ordered WHEN→DO rules with a
-//    pragmatic condition editor: predicate + ALL/ANY combine + NOT + timer),
-//    a DEFAULT action, a debounced live /validate readout, a HARDWARE section
-//    (seeded from /api/hardware/default, a sensible subset; v1 note surfaced),
-//    and NAME + SAVE.
+//  • LEFT  — CREATE panel, a two-stage flow:
+//      Stage 1 · HARDWARE — the full hardware editor (the same chassis / CoM /
+//        wedge / drivetrain / dohyo / distance + line sensor controls the robot
+//        Hardware builder uses, shared via <HardwareForm>), seeded from
+//        /api/hardware/default (or loaded from a saved robot), with a live 3D
+//        RobotPreview of the opponent being built. "NEXT: BEHAVIOR →".
+//      Stage 2 · LOGIC — the rule builder (ordered WHEN→DO rules with a
+//        pragmatic condition editor: predicate + ALL/ANY combine + NOT + timer),
+//        a DEFAULT action, a debounced live /validate readout, then NAME + SAVE.
+//        "← BACK" returns to Stage 1.
 //  • RIGHT — the saved-opponent ROSTER (instrument cards: name, #rules,
 //    created_at, DELETE + TEST), plus the TEST battle result (1 round, real
 //    physics) replayed in the reused DOHYO-CAM TrajectoryPlayer.
 //
-// A custom opponent fights on the STANDARD enemy chassis in v1 (its DSL drives
-// behaviour); the saved hardware_spec is recorded for the design — surfaced via
-// the backend `notes` after save.
+// The custom opponent now fights on the hardware built here (the backend spawns
+// it on its own chassis + motors), so the full spec the user authors is used in
+// sim — and its behaviour rules drive what it does.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, ApiError } from '../api';
 import { Panel, Reveal, StatusPill } from '../components/ui';
 import { Info } from '../components/Info';
-import { SliderField } from '../components/fields';
+import { HardwareForm } from '../components/HardwareForm';
+import { RobotPreview } from '../components/RobotPreview';
 import { TrajectoryPlayer } from '../components/TrajectoryPlayer';
 import type {
   BattleResult,
   CustomOpponentSummary,
+  Geometry,
   HardwareSpec,
   ModelCard,
   OpponentAction,
@@ -31,6 +39,7 @@ import type {
   OpponentDsl,
   OpponentPredicate,
   OpponentRule,
+  RobotSummary,
 } from '../types';
 
 const VALIDATE_DEBOUNCE_MS = 350;
@@ -173,7 +182,8 @@ export default function Opponents() {
   const [ruleCounts, setRuleCounts] = useState<Record<string, number>>({});
   const [rosterError, setRosterError] = useState<string | null>(null);
 
-  // Builder
+  // Builder — two-stage: HARDWARE first, then LOGIC.
+  const [stage, setStage] = useState<'hardware' | 'logic'>('hardware');
   const [name, setName] = useState('');
   const [rules, setRules] = useState<RuleDraft[]>([
     newRule({ preds: ['front_hit'], action: 'forward' }),
@@ -181,8 +191,15 @@ export default function Opponents() {
   ]);
   const [def, setDef] = useState<OpponentAction>('spin_left');
 
-  // Hardware (recorded only in v1)
+  // Hardware — the full spec the opponent is built on (used in sim).
   const [hwSpec, setHwSpec] = useState<HardwareSpec | null>(null);
+  const [geom, setGeom] = useState<Geometry | null>(null);
+  const [geomLoading, setGeomLoading] = useState(false);
+  const [geomError, setGeomError] = useState<string | null>(null);
+  const geomRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Optional "seed from a saved robot" picker.
+  const [robots, setRobots] = useState<RobotSummary[]>([]);
 
   // Validation (debounced)
   const [validOk, setValidOk] = useState<boolean | null>(null);
@@ -199,7 +216,7 @@ export default function Opponents() {
   const [testModelId, setTestModelId] = useState('');
   const [testingId, setTestingId] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<
-    { oppName: string; result: BattleResult } | null
+    { oppName: string; result: BattleResult; oppSpec: HardwareSpec | null } | null
   >(null);
   const [testError, setTestError] = useState<string | null>(null);
 
@@ -236,6 +253,10 @@ export default function Opponents() {
       .then(setHwSpec)
       .catch(() => {});
     api
+      .listRobots()
+      .then(setRobots)
+      .catch(() => {});
+    api
       .models()
       .then((ms) => {
         setModels(ms);
@@ -245,6 +266,41 @@ export default function Opponents() {
       })
       .catch(() => {});
   }, [reloadRoster]);
+
+  // ---- Debounced 3D geometry for the live preview --------------------------
+  useEffect(() => {
+    if (!hwSpec) return;
+    if (geomRef.current) clearTimeout(geomRef.current);
+    geomRef.current = setTimeout(async () => {
+      setGeomLoading(true);
+      try {
+        const g = await api.geometry(hwSpec);
+        setGeom(g);
+        setGeomError(null);
+      } catch (e) {
+        setGeomError(e instanceof ApiError ? e.message : String(e));
+      } finally {
+        setGeomLoading(false);
+      }
+    }, VALIDATE_DEBOUNCE_MS);
+    return () => {
+      if (geomRef.current) clearTimeout(geomRef.current);
+    };
+  }, [hwSpec]);
+
+  // Seed the hardware editor from a saved robot (optional convenience).
+  async function loadFromRobot(id: string) {
+    if (!id) return;
+    try {
+      const rec = await api.getRobot(id);
+      setHwSpec(rec.hardware_spec);
+    } catch (e) {
+      setSaveMsg({
+        kind: 'err',
+        text: e instanceof ApiError ? e.message : 'Could not load that robot.',
+      });
+    }
+  }
 
   // ---- Debounced validate --------------------------------------------------
   useEffect(() => {
@@ -320,6 +376,7 @@ export default function Opponents() {
       setSaveMsg({ kind: 'ok', text: `Saved “${rec.name}” (${rec.id}).` });
       setSavedNotes(rec.notes ?? null);
       setName('');
+      setStage('hardware');
       await reloadRoster();
     } catch (e) {
       setSaveMsg({
@@ -355,12 +412,21 @@ export default function Opponents() {
     setTestError(null);
     setTestResult(null);
     try {
-      const result = await api.runBattle({
-        a_model_id: testModelId,
-        b_opponent_id: o.id,
-        rounds: 1,
+      // Fetch the full record so the replay can render the opponent on its OWN
+      // built hardware (the list summary omits the spec). Non-fatal if it fails.
+      const [result, full] = await Promise.all([
+        api.runBattle({
+          a_model_id: testModelId,
+          b_opponent_id: o.id,
+          rounds: 1,
+        }),
+        api.getOpponent(o.id).catch(() => null),
+      ]);
+      setTestResult({
+        oppName: o.name,
+        result,
+        oppSpec: full?.hardware_spec ?? null,
       });
-      setTestResult({ oppName: o.name, result });
     } catch (e) {
       setTestError(e instanceof ApiError ? e.message : 'Test battle failed.');
     } finally {
@@ -371,100 +437,204 @@ export default function Opponents() {
   const saveDisabled = saving || validOk !== true || !name.trim() || !hwSpec;
 
   return (
-    <div className="grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+    <div className="grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)]">
       {/* ============================ CREATE ============================ */}
-      <Reveal index={0}>
-        <Panel title="Forge Opponent · rule builder" live ticks bodyClassName="flex flex-col gap-5 p-5">
-          {/* Name */}
-          <label className="flex flex-col gap-1">
-            <span className="micro text-fg-2" style={{ fontSize: 10 }}>
-              OPPONENT NAME
-            </span>
-            <input
-              className="ctl num"
-              value={name}
-              placeholder="e.g. Hunter-Mk1"
-              onChange={(e) => setName(e.target.value)}
-              style={{ fontSize: 13 }}
-            />
-          </label>
-
-          {/* Rules */}
-          <div className="flex flex-col gap-3">
-            <div className="flex items-center justify-between">
-              <span className="micro inline-flex items-center gap-1.5 text-fg-2" style={{ fontSize: 10 }}>
-                BEHAVIOR RULES · CHECKED TOP→BOTTOM
-                <Info topic="opp_rules" />
+      <div className="flex flex-col gap-5">
+        {/* Stage indicator */}
+        <Reveal index={0}>
+          <Panel title="Forge Opponent" live bodyClassName="p-3">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <StageChip n={1} label="HARDWARE" active={stage === 'hardware'} done={stage === 'logic'} />
+                <span className="num text-fg-2" style={{ fontSize: 12 }}>
+                  →
+                </span>
+                <StageChip n={2} label="LOGIC" active={stage === 'logic'} done={false} />
+              </div>
+              <span className="num text-fg-2" style={{ fontSize: 10 }}>
+                {stage === 'hardware'
+                  ? 'Build the chassis the opponent fights on.'
+                  : 'Now define how it behaves, then name + save.'}
               </span>
-              <button className="btn btn-secondary" onClick={addRule} style={{ height: 28, fontSize: 11 }}>
-                + RULE
-              </button>
+            </div>
+          </Panel>
+        </Reveal>
+
+        {stage === 'hardware' ? (
+          /* ---------------- STAGE 1 · HARDWARE ---------------- */
+          <div className="grid grid-cols-1 gap-5 2xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+            <div className="flex flex-col gap-5">
+              {/* Seed-from-robot picker */}
+              <Reveal index={1}>
+                <Panel title="Seed Hardware" live bodyClassName="flex flex-col gap-2 p-4">
+                  <span className="micro inline-flex items-center gap-1.5 text-fg-2" style={{ fontSize: 10 }}>
+                    LOAD FROM A SAVED ROBOT · OPTIONAL
+                    <Info topic="opp_hardware" />
+                  </span>
+                  <select
+                    className="ctl num"
+                    defaultValue=""
+                    onChange={(e) => {
+                      loadFromRobot(e.target.value);
+                      e.target.value = '';
+                    }}
+                    style={{ fontSize: 12 }}
+                  >
+                    <option value="">— start from default chassis —</option>
+                    {robots.map((r) => (
+                      <option key={r.id} value={r.id}>
+                        {r.name} · {r.id}
+                      </option>
+                    ))}
+                  </select>
+                  <span className="num text-fg-2" style={{ fontSize: 10, lineHeight: 1.5 }}>
+                    Pick a robot to copy its full spec into the editor below, or
+                    edit the default chassis directly. The opponent fights on
+                    exactly this hardware.
+                  </span>
+                </Panel>
+              </Reveal>
+
+              {hwSpec ? (
+                <HardwareForm
+                  spec={hwSpec}
+                  setSpec={(updater) =>
+                    setHwSpec((prev) => (prev ? updater(prev) : prev))
+                  }
+                  startIndex={2}
+                />
+              ) : (
+                <Panel title="Hardware" live>
+                  <span className="num text-fg-2" style={{ fontSize: 11 }}>
+                    Loading default chassis…
+                  </span>
+                </Panel>
+              )}
+
+              <Reveal index={8}>
+                <button
+                  className="btn btn-primary"
+                  onClick={() => setStage('logic')}
+                  disabled={!hwSpec}
+                  style={{ height: 40, fontSize: 14 }}
+                >
+                  NEXT: BEHAVIOR →
+                </button>
+              </Reveal>
             </div>
 
-            {rules.length === 0 && (
-              <span className="num" style={{ fontSize: 11, color: 'var(--warn)' }}>
-                No rules yet — add at least one (the validator requires it).
-              </span>
-            )}
-
-            {rules.map((r, i) => (
-              <RuleEditor
-                key={r.key}
-                rule={r}
-                index={i}
-                count={rules.length}
-                onPatch={(patch) => patchRule(r.key, patch)}
-                onTogglePred={(p) => togglePred(r.key, p)}
-                onRemove={() => removeRule(r.key)}
-                onMove={(dir) => moveRule(r.key, dir)}
+            {/* Live preview of the opponent being built */}
+            <Reveal index={1} className="2xl:sticky 2xl:top-5 2xl:self-start">
+              <RobotPreview
+                geom={geom}
+                spec={hwSpec}
+                loading={geomLoading}
+                error={geomError}
               />
-            ))}
+            </Reveal>
           </div>
-
-          {/* Default */}
-          <label className="flex flex-col gap-1">
-            <span className="micro inline-flex items-center gap-1.5 text-fg-2" style={{ fontSize: 10 }}>
-              DEFAULT ACTION · WHEN NO RULE MATCHES
-              <Info topic="opp_default" />
-            </span>
-            <ActionSelect value={def} onChange={setDef} />
-          </label>
-
-          {/* Live validation */}
-          <ValidateBanner ok={validOk} errors={validErrors} />
-
-          {/* Hardware (recorded only) */}
-          <HardwareSection spec={hwSpec} setSpec={setHwSpec} />
-
-          {/* Save */}
-          <div className="flex flex-col gap-2">
-            <button
-              className="btn btn-primary"
-              disabled={saveDisabled}
-              onClick={save}
-              style={{ height: 40, fontSize: 15 }}
-            >
-              {saving ? 'SAVING…' : '⛭ SAVE OPPONENT'}
-            </button>
-            {saveMsg && (
-              <span
-                className="num"
-                style={{
-                  fontSize: 11,
-                  color: saveMsg.kind === 'ok' ? 'var(--win)' : 'var(--loss)',
-                }}
+        ) : (
+          /* ---------------- STAGE 2 · LOGIC ---------------- */
+          <Reveal index={1}>
+            <Panel title="Behavior Logic · rule builder" live ticks bodyClassName="flex flex-col gap-5 p-5">
+              {/* Back */}
+              <button
+                className="btn btn-ghost self-start"
+                onClick={() => setStage('hardware')}
+                style={{ height: 30, fontSize: 11 }}
               >
-                {saveMsg.text}
-              </span>
-            )}
-            {savedNotes && (
-              <span className="num text-fg-2" style={{ fontSize: 10, lineHeight: 1.5 }}>
-                ⓘ {savedNotes}
-              </span>
-            )}
-          </div>
-        </Panel>
-      </Reveal>
+                ← BACK TO HARDWARE
+              </button>
+
+              {/* Name */}
+              <label className="flex flex-col gap-1">
+                <span className="micro text-fg-2" style={{ fontSize: 10 }}>
+                  OPPONENT NAME
+                </span>
+                <input
+                  className="ctl num"
+                  value={name}
+                  placeholder="e.g. Hunter-Mk1"
+                  onChange={(e) => setName(e.target.value)}
+                  style={{ fontSize: 13 }}
+                />
+              </label>
+
+              {/* Rules */}
+              <div className="flex flex-col gap-3">
+                <div className="flex items-center justify-between">
+                  <span className="micro inline-flex items-center gap-1.5 text-fg-2" style={{ fontSize: 10 }}>
+                    BEHAVIOR RULES · CHECKED TOP→BOTTOM
+                    <Info topic="opp_rules" />
+                  </span>
+                  <button className="btn btn-secondary" onClick={addRule} style={{ height: 28, fontSize: 11 }}>
+                    + RULE
+                  </button>
+                </div>
+
+                {rules.length === 0 && (
+                  <span className="num" style={{ fontSize: 11, color: 'var(--warn)' }}>
+                    No rules yet — add at least one (the validator requires it).
+                  </span>
+                )}
+
+                {rules.map((r, i) => (
+                  <RuleEditor
+                    key={r.key}
+                    rule={r}
+                    index={i}
+                    count={rules.length}
+                    onPatch={(patch) => patchRule(r.key, patch)}
+                    onTogglePred={(p) => togglePred(r.key, p)}
+                    onRemove={() => removeRule(r.key)}
+                    onMove={(dir) => moveRule(r.key, dir)}
+                  />
+                ))}
+              </div>
+
+              {/* Default */}
+              <label className="flex flex-col gap-1">
+                <span className="micro inline-flex items-center gap-1.5 text-fg-2" style={{ fontSize: 10 }}>
+                  DEFAULT ACTION · WHEN NO RULE MATCHES
+                  <Info topic="opp_default" />
+                </span>
+                <ActionSelect value={def} onChange={setDef} />
+              </label>
+
+              {/* Live validation */}
+              <ValidateBanner ok={validOk} errors={validErrors} />
+
+              {/* Save */}
+              <div className="flex flex-col gap-2">
+                <button
+                  className="btn btn-primary"
+                  disabled={saveDisabled}
+                  onClick={save}
+                  style={{ height: 40, fontSize: 15 }}
+                >
+                  {saving ? 'SAVING…' : '⛭ SAVE OPPONENT'}
+                </button>
+                {saveMsg && (
+                  <span
+                    className="num"
+                    style={{
+                      fontSize: 11,
+                      color: saveMsg.kind === 'ok' ? 'var(--win)' : 'var(--loss)',
+                    }}
+                  >
+                    {saveMsg.text}
+                  </span>
+                )}
+                {savedNotes && (
+                  <span className="num text-fg-2" style={{ fontSize: 10, lineHeight: 1.5 }}>
+                    ⓘ {savedNotes}
+                  </span>
+                )}
+              </div>
+            </Panel>
+          </Reveal>
+        )}
+      </div>
 
       {/* ============================ ROSTER + TEST ============================ */}
       <div className="flex flex-col gap-5">
@@ -552,6 +722,7 @@ export default function Opponents() {
               <div className="min-h-[360px]">
                 <TrajectoryPlayer
                   traj={testResult.result.trajectory ?? null}
+                  opponentSpec={testResult.oppSpec}
                   label={`${testModelId} vs ${testResult.oppName}`}
                 />
               </div>
@@ -833,89 +1004,41 @@ function ValidateBanner({
   );
 }
 
-function HardwareSection({
-  spec,
-  setSpec,
+function StageChip({
+  n,
+  label,
+  active,
+  done,
 }: {
-  spec: HardwareSpec | null;
-  setSpec: (s: HardwareSpec) => void;
+  n: number;
+  label: string;
+  active: boolean;
+  done: boolean;
 }) {
-  if (!spec) {
-    return (
-      <span className="num text-fg-2" style={{ fontSize: 11 }}>
-        Loading default chassis…
-      </span>
-    );
-  }
-  const c = spec.chassis;
-  const d = spec.drivetrain;
+  const color = active ? 'var(--accent)' : done ? 'var(--cyan)' : 'var(--fg-2)';
   return (
-    <div className="flex flex-col gap-3">
-      <span className="micro inline-flex items-center gap-1.5 text-fg-2" style={{ fontSize: 10 }}>
-        HARDWARE · RECORDED FOR THE DESIGN
-        <Info topic="opp_hardware" />
-      </span>
-      <span className="num text-fg-2" style={{ fontSize: 10, lineHeight: 1.5 }}>
-        ⚠ v1: a custom opponent fights on the STANDARD enemy chassis — these
-        values are saved with the record but don't yet change its body. Its
-        behavior rules fully drive what it does.
-      </span>
-      <div
-        className="flex flex-col gap-3 rounded border p-3"
-        style={{ borderColor: 'var(--line)', background: 'var(--bg-2)' }}
+    <span className="inline-flex items-center gap-1.5">
+      <span
+        className="num inline-flex items-center justify-center"
+        style={{
+          width: 18,
+          height: 18,
+          fontSize: 10,
+          borderRadius: '50%',
+          border: `1px solid ${color}`,
+          color,
+          background: active ? 'var(--accent-glow)' : 'transparent',
+        }}
       >
-        <SliderField
-          label="MASS"
-          unit="kg"
-          info="mass"
-          value={c.mass_kg}
-          min={0.1}
-          max={1.5}
-          step={0.01}
-          format={(v) => v.toFixed(2)}
-          onChange={(v) => setSpec({ ...spec, chassis: { ...c, mass_kg: v } })}
-        />
-        <SliderField
-          label="WHEEL RADIUS"
-          unit="m"
-          info="wheel_radius"
-          value={d.wheel_radius_m}
-          min={0.005}
-          max={0.06}
-          step={0.001}
-          format={(v) => v.toFixed(3)}
-          onChange={(v) =>
-            setSpec({ ...spec, drivetrain: { ...d, wheel_radius_m: v } })
-          }
-        />
-        <SliderField
-          label="MAX TORQUE"
-          unit="N·m"
-          info="max_torque"
-          value={d.max_torque_nm}
-          min={0.02}
-          max={0.5}
-          step={0.005}
-          format={(v) => v.toFixed(3)}
-          onChange={(v) =>
-            setSpec({ ...spec, drivetrain: { ...d, max_torque_nm: v } })
-          }
-        />
-        <SliderField
-          label="MAX OMEGA"
-          unit="rad/s"
-          info="max_omega"
-          value={d.max_omega_rad_s}
-          min={5}
-          max={80}
-          step={0.5}
-          format={(v) => v.toFixed(1)}
-          onChange={(v) =>
-            setSpec({ ...spec, drivetrain: { ...d, max_omega_rad_s: v } })
-          }
-        />
-      </div>
-    </div>
+        {done ? '✓' : n}
+      </span>
+      <span
+        className="micro"
+        style={{ fontSize: 11, letterSpacing: '.1em', color }}
+      >
+        {label}
+      </span>
+    </span>
   );
 }
 
