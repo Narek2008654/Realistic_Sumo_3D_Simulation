@@ -26,6 +26,10 @@ export interface TrainSetup {
   startMult: number;
   hyperparams: TrainHyperparamOverrides;
   smoke: boolean;
+  // Adaptive opponent weighting: the mix re-weights itself from per-opponent
+  // win-rates each eval (guarded by a reserved zoo share + per-opponent cap +
+  // EMA), so training auto-focuses on what the model is losing.
+  adaptiveOpponents: boolean;
   // Per-opponent include + raw weight, keyed by opponent id. Empty until the
   // opponents list loads and seeds defaults.
   opponents: Record<string, OppChoice>;

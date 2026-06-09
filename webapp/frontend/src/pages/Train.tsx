@@ -396,6 +396,9 @@ function Setup({ onStarted }: { onStarted: (jobId: string) => void }) {
   const [algo, setAlgo] = useState<TrainAlgo>(saved?.algo ?? 'dqn');
   const [mode, setMode] = useState<TrainMode>(saved?.mode ?? 'scratch');
   const [smoke, setSmoke] = useState(saved?.smoke ?? false);
+  const [adaptiveOpponents, setAdaptiveOpponents] = useState(
+    saved?.adaptiveOpponents ?? false,
+  );
 
   const [defaultSpec, setDefaultSpec] = useState<HardwareSpec | null>(null);
   const [robotSpec, setRobotSpec] = useState<HardwareSpec | null>(null);
@@ -619,11 +622,13 @@ function Setup({ onStarted }: { onStarted: (jobId: string) => void }) {
         clip,
       },
       smoke,
+      adaptiveOpponents,
       opponents: opps,
     }),
     [
       sourceKind, robotId, algo, mode, baseModelId, totalSteps, evalEvery,
-      startMult, lr, gamma, netArch, nStep, tau, entCoef, clip, smoke, opps,
+      startMult, lr, gamma, netArch, nStep, tau, entCoef, clip, smoke,
+      adaptiveOpponents, opps,
     ],
   );
 
@@ -682,6 +687,7 @@ function Setup({ onStarted }: { onStarted: (jobId: string) => void }) {
       start_mult: startMult,
       hyperparams,
       opponent_weights: Object.keys(incWeights).length ? incWeights : undefined,
+      adaptive_opponents: adaptiveOpponents || undefined,
       smoke: smoke || undefined,
     };
     if (sourceKind === 'robot') body.robot_id = robotId;
@@ -911,6 +917,22 @@ function Setup({ onStarted }: { onStarted: (jobId: string) => void }) {
             weightSum={weightSum}
             weightsValid={weightsValid}
           />
+
+          {/* Adaptive opponent weighting */}
+          <label className="flex cursor-pointer items-start gap-2">
+            <input
+              type="checkbox"
+              checked={adaptiveOpponents}
+              onChange={(e) => setAdaptiveOpponents(e.target.checked)}
+              style={{ accentColor: 'var(--accent)', marginTop: 2 }}
+            />
+            <span className="num" style={{ fontSize: 11, color: 'var(--fg-1)' }}>
+              ADAPTIVE OPPONENT WEIGHTS — re-weight the mix from each eval&rsquo;s
+              per-opponent win-rates, auto-focusing on what the model is losing.
+              The weights above seed the start; the built-in zoo keeps a reserved
+              share, per-opponent weights are capped, and shifts are smoothed.
+            </span>
+          </label>
 
           {/* Smoke toggle */}
           <label className="flex cursor-pointer items-center gap-2">

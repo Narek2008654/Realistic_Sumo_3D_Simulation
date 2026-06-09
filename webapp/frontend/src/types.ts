@@ -208,6 +208,7 @@ export interface StartTrainBody {
   start_mult?: number;
   hyperparams?: TrainHyperparamOverrides;
   opponent_weights?: Record<string, number> | null;
+  adaptive_opponents?: boolean; // re-weight the mix from per-opponent win-rates
   smoke?: boolean;
   seed?: number;
 }
