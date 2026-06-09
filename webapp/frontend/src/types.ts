@@ -322,6 +322,34 @@ export interface TrainJobSummary {
   running: boolean;
 }
 
+/**
+ * A finished (or still-running) training run, surfaced from
+ * GET /api/models/runs — one entry per job dir under config.JOBS_DIR. The
+ * `best_*` fields come from the latest `{"t":"checkpoint"}` line in the job's
+ * progress.jsonl (all null if the job never logged a checkpoint). A run with
+ * `has_best`/`has_final` can be promoted into the registry.
+ */
+export interface TrainRun {
+  job_id: string;
+  algo: string | null;
+  mode: string | null;
+  created_at: string | null;
+  running: boolean;
+  has_best: boolean;
+  has_final: boolean;
+  best_step: number | null;
+  best_wr: number | null; // 0..1 win-rate at the best checkpoint
+  best_self_out: number | null; // 0..1 self-out rate at the best checkpoint
+}
+
+/** Body for POST /api/models/promote. `which` selects best.pt vs final.pt;
+ *  `name` is slugified server-side into the new checkpoint id. */
+export interface PromoteBody {
+  job_id: string;
+  which: 'best' | 'final';
+  name: string;
+}
+
 // ---- Custom opponents (rule-DSL) --------------------------------------------
 
 /** The fixed action vocabulary (maps to bounded wheel commands on the backend). */

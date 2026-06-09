@@ -22,6 +22,10 @@ from __future__ import annotations
 import torch  # noqa: F401  (must precede numpy for Windows DLL ordering)
 
 import json
+import os
+import pickle
+import re
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -37,8 +41,34 @@ __all__ = [
     "finetune_candidates",
     "evaluate_model",
     "delete_model",
+    "list_runs",
+    "promote_job_model",
+    "slugify",
+    "PromoteError",
+    "PromoteNotFound",
+    "PromoteConflict",
+    "PromoteInvalid",
     "PROTECTED_MODEL_IDS",
 ]
+
+
+# --- Promotion errors -------------------------------------------------------
+# Distinct types so the router can map each to the right HTTP status without
+# string-sniffing: NotFound -> 404, Conflict -> 409, Invalid -> 422.
+class PromoteError(ValueError):
+    """Base class for a model-promotion failure (a ``ValueError`` subclass)."""
+
+
+class PromoteNotFound(PromoteError):
+    """The source job / ``<which>.pt`` does not exist (maps to 404)."""
+
+
+class PromoteConflict(PromoteError):
+    """The destination already exists or is protected (maps to 409)."""
+
+
+class PromoteInvalid(PromoteError):
+    """The request is malformed: bad ``which`` or empty/unsafe name (422)."""
 
 # Deploy / canonical checkpoints that the UI must NOT delete (these are the
 # committed, git-tracked models — the deployed champion + the BC bases). They
@@ -68,9 +98,16 @@ def _iso(ts: float) -> str:
 def _infer_arch(pt_path: Path) -> dict[str, Any]:
     """Read a bare state_dict and derive obs/action dims, arch, params.
 
-    Raises ``ValueError`` if the checkpoint isn't the expected dueling shape.
+    Raises ``ValueError`` if the checkpoint isn't the expected dueling shape OR
+    is unreadable (truncated / half-written / not a torch archive) — so callers'
+    ``except ValueError`` simply skips a bad file instead of 500-ing the whole
+    registry listing.
     """
-    state = torch.load(str(pt_path), map_location="cpu", weights_only=True)
+    try:
+        state = torch.load(str(pt_path), map_location="cpu", weights_only=True)
+    except (RuntimeError, OSError, EOFError, pickle.UnpicklingError) as exc:
+        # corrupt / truncated / not-a-torch-archive -> skip, don't 500 the list
+        raise ValueError(f"{pt_path.name}: unreadable checkpoint ({exc})") from exc
     try:
         h1, obs_dim = state["trunk.0.weight"].shape
         h2 = state["trunk.2.weight"].shape[0]
@@ -227,6 +264,136 @@ def delete_model(model_id: str) -> bool:
     pt_path.unlink(missing_ok=True)
     _card_path(model_id).unlink(missing_ok=True)
     return True
+
+
+# --- Run promotion ----------------------------------------------------------
+def slugify(name: str) -> str:
+    """Lower-kebab a display name to a registry-safe model id.
+
+    Lowercases, replaces any run of non-``[a-z0-9]`` characters with a single
+    ``-``, and strips leading/trailing dashes. Returns ``""`` when there are no
+    safe characters at all (the caller treats that as a 422).
+    """
+    if not isinstance(name, str):
+        return ""
+    slug = re.sub(r"[^a-z0-9]+", "-", name.strip().lower()).strip("-")
+    return slug
+
+
+def list_runs() -> list[dict[str, Any]]:
+    """One summary per training-job dir under ``config.JOBS_DIR``.
+
+    Each entry is shaped for ``GET /api/models/runs``::
+
+        {job_id, algo, mode, created_at, running, has_best, has_final,
+         best_step, best_wr, best_self_out}
+
+    ``algo``/``mode``/``created_at`` come from ``job.json``; ``running`` from
+    :func:`training.active_job_id`; ``has_best``/``has_final`` from the
+    presence of ``best.pt``/``final.pt``; and ``best_step``/``best_wr``/
+    ``best_self_out`` from the latest ``{"t": "checkpoint"}`` line in the job's
+    ``progress.jsonl`` (``None`` when the job has no checkpoint yet). Sorted
+    newest-first by ``created_at``.
+    """
+    # Lazy import: training imports registry, so importing it at module load
+    # would be circular. By call time both modules are fully initialised.
+    from webapp.backend import training
+
+    config.ensure_dirs()
+    active = training.active_job_id()
+
+    runs: list[dict[str, Any]] = []
+    for child in sorted(config.JOBS_DIR.iterdir()):
+        if not child.is_dir():
+            continue
+        meta = training._job_meta(child)
+        if meta is None:
+            continue
+        job_id = meta.get("id", child.name)
+
+        best_step = best_wr = best_self_out = None
+        events = training._read_progress(child)
+        checkpoints = [e for e in events if e.get("t") == "checkpoint"]
+        if checkpoints:
+            latest = checkpoints[-1]
+            ev = latest.get("eval") or {}
+            best_step = latest.get("step")
+            best_wr = ev.get("wr")
+            best_self_out = ev.get("self_out")
+
+        runs.append({
+            "job_id": job_id,
+            "algo": meta.get("algo"),
+            "mode": meta.get("mode"),
+            "created_at": meta.get("started_at"),
+            "running": job_id == active,
+            "has_best": (child / "best.pt").is_file(),
+            "has_final": (child / "final.pt").is_file(),
+            "best_step": best_step,
+            "best_wr": best_wr,
+            "best_self_out": best_self_out,
+        })
+
+    runs.sort(key=lambda r: r.get("created_at") or "", reverse=True)
+    return runs
+
+
+def promote_job_model(
+    job_id: str, which: str = "best", name: str | None = None
+) -> dict[str, Any]:
+    """Copy a finished job's ``<which>.pt`` into the committed registry.
+
+    ``which`` selects ``best.pt`` or ``final.pt`` under
+    ``config.JOBS_DIR/<job_id>/``. ``name`` is slugged (lower-kebab) to the new
+    model id; the file is copied to ``config.CHECKPOINTS/<slug>.pt`` and the
+    fresh :func:`get_model` card is returned.
+
+    Raises:
+      * :class:`PromoteInvalid` (422) — ``which`` not in ``{best, final}`` or
+        ``name`` empty / has no slug-safe characters.
+      * :class:`PromoteNotFound` (404) — unknown job or missing ``<which>.pt``.
+      * :class:`PromoteConflict` (409) — destination already exists OR the slug
+        is protected (we never overwrite an existing/deployed model).
+    """
+    if which not in ("best", "final"):
+        raise PromoteInvalid("which must be 'best' or 'final'")
+
+    slug = slugify(name or "")
+    if not slug:
+        raise PromoteInvalid("name must contain at least one [a-z0-9] character")
+
+    # Resolve the job dir and confirm it stays UNDER JOBS_DIR, so a crafted
+    # job_id (e.g. '../x') can't read a .pt from outside the jobs tree.
+    jobs_root = config.JOBS_DIR.resolve()
+    job_dir = (config.JOBS_DIR / job_id).resolve()
+    if job_dir == jobs_root or not job_dir.is_relative_to(jobs_root):
+        raise PromoteNotFound(f"invalid job id: {job_id!r}")
+    source = job_dir / f"{which}.pt"
+    if not source.is_file():
+        raise PromoteNotFound(
+            f"no {which}.pt for job {job_id!r} (unknown job or unfinished run)"
+        )
+
+    # Protected ids are stored snake_case (e.g. ``ppo_robust_best``) but slugs
+    # are kebab-case, so compare both the slug and its underscore variant — a
+    # promotion must never shadow a deployed model under a near-identical name.
+    if slug in PROTECTED_MODEL_IDS or slug.replace("-", "_") in PROTECTED_MODEL_IDS:
+        raise PromoteConflict(
+            f"{slug!r} is a protected/deployed model — choose another name"
+        )
+    dest = config.CHECKPOINTS / f"{slug}.pt"
+    if dest.exists():
+        raise PromoteConflict(f"a model named {slug!r} already exists")
+
+    config.ensure_dirs()
+    config.CHECKPOINTS.mkdir(parents=True, exist_ok=True)
+    # Atomic publish: copy to a temp path then os.replace, so a crash mid-copy
+    # can't leave a half-written .pt that breaks the whole registry listing.
+    # copy2 preserves the source mtime, so get_model() rebuilds the card cleanly.
+    tmp = dest.with_suffix(dest.suffix + ".promote.tmp")
+    shutil.copy2(source, tmp)
+    os.replace(str(tmp), str(dest))
+    return get_model(slug)
 
 
 def finetune_candidates(

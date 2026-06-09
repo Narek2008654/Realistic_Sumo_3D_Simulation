@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Body, HTTPException
 
 from webapp.backend import registry
 
@@ -15,6 +15,37 @@ router = APIRouter(prefix="/api/models", tags=["models"])
 def list_models() -> list[dict[str, Any]]:
     """All registry cards (one per recognised ``checkpoints/*.pt``)."""
     return registry.list_models()
+
+
+# NOTE: the static ``/runs`` and ``/promote`` routes MUST be declared before
+# the dynamic ``/{model_id}`` route below — otherwise FastAPI matches them as a
+# model id and they 404.
+@router.get("/runs")
+def list_runs() -> list[dict[str, Any]]:
+    """One summary per training-job dir (source for the promote picker)."""
+    return registry.list_runs()
+
+
+@router.post("/promote")
+def promote(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    """Promote a finished job's ``best``/``final`` checkpoint into the registry.
+
+    Body: ``{job_id, which: 'best'|'final', name}``. Returns the new ModelCard.
+    404 unknown job / missing ``<which>.pt``; 409 name collision or protected
+    slug; 422 bad ``which`` or empty/unsafe ``name``.
+    """
+    try:
+        return registry.promote_job_model(
+            job_id=str(payload.get("job_id") or ""),
+            which=str(payload.get("which") or "best"),
+            name=payload.get("name"),
+        )
+    except registry.PromoteNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except registry.PromoteConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except registry.PromoteInvalid as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.get("/{model_id}")

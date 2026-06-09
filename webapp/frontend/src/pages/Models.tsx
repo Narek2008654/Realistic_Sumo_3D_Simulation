@@ -1,8 +1,19 @@
-// Model Registry: instrument-style table + per-model cards from /api/models.
-import { useEffect, useState } from 'react';
+// Model Registry: instrument-style table + per-model cards from /api/models,
+// plus a TRAINING RUNS panel that promotes finished runs into the registry.
+import { useCallback, useEffect, useState } from 'react';
+import type { CSSProperties } from 'react';
 import { api, ApiError } from '../api';
-import { Panel, Reveal, StatusDot } from '../components/ui';
-import type { EvalMode, ModelCard } from '../types';
+import { Panel, Reveal, StatusDot, StatusPill } from '../components/ui';
+import type { EvalMode, ModelCard, TrainRun } from '../types';
+
+/** Lower-kebab slug, [a-z0-9-] only — mirrors the backend's slug() so the
+ *  prefilled name previews as the id the checkpoint will actually get. */
+function slugify(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
 
 function metricNumber(
   metrics: ModelCard['metrics'],
@@ -452,53 +463,380 @@ function Stat({ label, value }: { label: string; value: string }) {
   );
 }
 
+/** Format a 0..1 rate as a 0-padded percent, or an em dash when null. */
+function pct(frac: number | null): string {
+  if (frac == null) return '—';
+  return `${Math.round(Math.max(0, Math.min(1, frac)) * 100)}%`;
+}
+
+const RUN_BTN: CSSProperties = {
+  fontSize: 10,
+  letterSpacing: '.06em',
+  padding: '3px 8px',
+  borderRadius: 'var(--radius)',
+  border: '1px solid var(--line-2)',
+  background: 'var(--bg-2)',
+  cursor: 'pointer',
+};
+
+/**
+ * One training-run row with an inline promote control. A run is promotable when
+ * it has at least one of best.pt / final.pt; we default `which` to whichever it
+ * has (preferring best). `onPromoted` triggers a registry refetch in the parent
+ * so the freshly-minted card appears in both the table and the card grid.
+ */
+function RunRow({
+  run,
+  onPromoted,
+}: {
+  run: TrainRun;
+  onPromoted: () => void;
+}) {
+  const short = run.job_id.slice(0, 8);
+  const defaultName = `${run.algo ?? 'model'}-${short}`;
+  const canBest = run.has_best;
+  const canFinal = run.has_final;
+  const promotable = canBest || canFinal;
+
+  const [open, setOpen] = useState(false);
+  const [which, setWhich] = useState<'best' | 'final'>(
+    canBest ? 'best' : 'final',
+  );
+  const [name, setName] = useState(defaultName);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [okId, setOkId] = useState<string | null>(null);
+
+  const slug = slugify(name);
+
+  async function promote() {
+    if (busy || !slug) return;
+    setBusy(true);
+    setErr(null);
+    setOkId(null);
+    try {
+      const card = await api.promoteRun({ job_id: run.job_id, which, name });
+      setOkId(card.id);
+      setOpen(false);
+      onPromoted(); // refetch the registry so the new card shows up
+    } catch (e) {
+      if (e instanceof ApiError) {
+        if (e.status === 404)
+          setErr('Run or checkpoint not found (may have been deleted).');
+        else if (e.status === 409)
+          setErr(`Name "${slug}" is taken or protected — pick another.`);
+        else if (e.status === 422)
+          setErr(e.message || 'Invalid name or checkpoint selection.');
+        else setErr(e.message);
+      } else {
+        setErr('Promote failed.');
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div
+      className="flex flex-col gap-2 rounded border px-3 py-2.5"
+      style={{ borderColor: 'var(--line)', background: 'var(--bg-2)' }}
+    >
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2.5">
+          <span className="num text-fg-0" style={{ fontSize: 12 }} title={run.job_id}>
+            {short}
+          </span>
+          <span className="micro" style={{ fontSize: 9, color: 'var(--accent)' }}>
+            {run.algo ?? '—'}
+          </span>
+          {run.mode && (
+            <span className="micro text-fg-2" style={{ fontSize: 9 }}>
+              {run.mode}
+            </span>
+          )}
+          {run.running && (
+            <StatusPill status="accent" label="RUNNING" pulse />
+          )}
+        </div>
+        <div className="flex items-center gap-3">
+          <span className="num text-fg-2" style={{ fontSize: 10 }}>
+            {run.best_step != null ? `step ${run.best_step.toLocaleString()}` : 'no checkpoint'}
+          </span>
+          <WinRateBar frac={run.best_wr} trackWidth={64} />
+          <span
+            className="num"
+            style={{ fontSize: 10, color: run.best_self_out != null ? 'var(--loss)' : 'var(--fg-2)' }}
+            title="Self-out rate at best checkpoint"
+          >
+            SO {pct(run.best_self_out)}
+          </span>
+          {promotable ? (
+            <button
+              onClick={() => setOpen((v) => !v)}
+              className="micro"
+              style={{ ...RUN_BTN, color: 'var(--accent)' }}
+            >
+              {open ? 'CANCEL' : okId ? 'PROMOTE AGAIN' : 'PROMOTE'}
+            </button>
+          ) : (
+            <span
+              className="micro text-fg-2"
+              style={{ fontSize: 9 }}
+              title="No best.pt / final.pt yet — let the run produce a checkpoint."
+            >
+              NO WEIGHTS
+            </span>
+          )}
+        </div>
+      </div>
+
+      {okId && !open && (
+        <div className="num" style={{ fontSize: 10, color: 'var(--win)' }}>
+          ✓ promoted to <span style={{ color: 'var(--cyan)' }}>{okId}</span>
+        </div>
+      )}
+
+      {open && (
+        <div
+          className="flex flex-col gap-2 rounded border px-3 py-2.5"
+          style={{ borderColor: 'var(--line)', background: 'var(--bg-1)' }}
+        >
+          <div className="flex flex-wrap items-end gap-3">
+            <label className="flex flex-col gap-1">
+              <span className="micro text-fg-2" style={{ fontSize: 9 }}>
+                CHECKPOINT
+              </span>
+              <div className="flex gap-1.5">
+                <button
+                  onClick={() => setWhich('best')}
+                  disabled={!canBest}
+                  className="micro"
+                  style={{
+                    ...RUN_BTN,
+                    borderColor: which === 'best' ? 'var(--accent)' : 'var(--line-2)',
+                    color: !canBest ? 'var(--fg-2)' : which === 'best' ? 'var(--accent)' : 'var(--fg-1)',
+                    cursor: canBest ? 'pointer' : 'default',
+                  }}
+                  title={canBest ? 'best.pt — highest win-rate snapshot' : 'no best.pt for this run'}
+                >
+                  BEST
+                </button>
+                <button
+                  onClick={() => setWhich('final')}
+                  disabled={!canFinal}
+                  className="micro"
+                  style={{
+                    ...RUN_BTN,
+                    borderColor: which === 'final' ? 'var(--accent)' : 'var(--line-2)',
+                    color: !canFinal ? 'var(--fg-2)' : which === 'final' ? 'var(--accent)' : 'var(--fg-1)',
+                    cursor: canFinal ? 'pointer' : 'default',
+                  }}
+                  title={canFinal ? 'final.pt — last snapshot at end of run' : 'no final.pt for this run'}
+                >
+                  FINAL
+                </button>
+              </div>
+            </label>
+
+            <label className="flex flex-1 flex-col gap-1" style={{ minWidth: 160 }}>
+              <span className="micro text-fg-2" style={{ fontSize: 9 }}>
+                MODEL NAME
+              </span>
+              <input
+                type="text"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') promote();
+                }}
+                placeholder={defaultName}
+                className="num"
+                style={{
+                  fontSize: 12,
+                  color: 'var(--cyan)',
+                  background: 'var(--bg-2)',
+                  border: '1px solid var(--line)',
+                  borderRadius: 'var(--radius)',
+                  padding: '4px 7px',
+                }}
+              />
+            </label>
+
+            <button
+              onClick={promote}
+              disabled={busy || !slug}
+              className="micro"
+              style={{
+                ...RUN_BTN,
+                border: '1px solid var(--accent)',
+                color: busy || !slug ? 'var(--fg-2)' : 'var(--accent)',
+                cursor: busy || !slug ? 'default' : 'pointer',
+              }}
+            >
+              {busy ? 'PROMOTING…' : 'PROMOTE →'}
+            </button>
+          </div>
+
+          <div className="num text-fg-2" style={{ fontSize: 9 }}>
+            saves as checkpoints/
+            <span style={{ color: slug ? 'var(--cyan)' : 'var(--loss)' }}>
+              {slug || 'enter a name'}
+            </span>
+            .pt
+          </div>
+
+          {err && (
+            <div className="num" style={{ fontSize: 10, color: 'var(--loss)' }}>
+              {err}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** TRAINING RUNS panel: lists job dirs from /api/models/runs and lets each one
+ *  with weights be promoted into the registry. */
+function TrainingRuns({ onPromoted }: { onPromoted: () => void }) {
+  const [runs, setRuns] = useState<TrainRun[] | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  const load = useCallback(() => {
+    api
+      .listRuns()
+      .then(setRuns)
+      .catch((e) => setErr(e instanceof ApiError ? e.message : String(e)));
+  }, []);
+
+  useEffect(load, [load]);
+
+  // After a promote, refetch both the registry (parent) and the runs list (so a
+  // newly-appeared final.pt etc. is reflected).
+  const handlePromoted = useCallback(() => {
+    onPromoted();
+    load();
+  }, [onPromoted, load]);
+
+  return (
+    <Panel
+      title="Training Runs"
+      live
+      right={
+        <button
+          onClick={load}
+          className="micro"
+          style={{ fontSize: 9, color: 'var(--cyan)', cursor: 'pointer', background: 'transparent', border: 'none' }}
+          title="Refresh the run list"
+        >
+          ↻ REFRESH
+        </button>
+      }
+    >
+      {err ? (
+        <div className="flex items-center gap-2">
+          <StatusDot status="down" />
+          <span className="num" style={{ fontSize: 11, color: 'var(--loss)' }}>
+            {err}
+          </span>
+        </div>
+      ) : !runs ? (
+        <span className="micro animate-pulse" style={{ color: 'var(--cyan)' }}>
+          LOADING RUNS…
+        </span>
+      ) : runs.length === 0 ? (
+        <p className="num text-fg-1" style={{ fontSize: 12 }}>
+          No training runs found. Start one on the{' '}
+          <span style={{ color: 'var(--accent)' }}>Train</span> page.
+        </p>
+      ) : (
+        <div className="flex flex-col gap-2">
+          {runs.map((run) => (
+            <RunRow key={run.job_id} run={run} onPromoted={handlePromoted} />
+          ))}
+        </div>
+      )}
+    </Panel>
+  );
+}
+
 export default function Models() {
   const [cards, setCards] = useState<ModelCard[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
+  // Shared loader so a promote can refetch the whole registry — the new card
+  // then appears in both the table and the card grid below.
+  const loadModels = useCallback(() => {
     api
       .models()
       .then(setCards)
       .catch((e) => setError(e instanceof ApiError ? e.message : String(e)));
   }, []);
 
+  useEffect(loadModels, [loadModels]);
+
+  // The TRAINING RUNS panel renders in every state (incl. error/empty) so a run
+  // can be promoted even before any model exists in the registry.
+  const runsPanel = (
+    <Reveal index={0}>
+      <TrainingRuns onPromoted={loadModels} />
+    </Reveal>
+  );
+
   if (error) {
     return (
-      <Panel title="Model Registry" live>
-        <div className="flex items-center gap-2">
-          <StatusDot status="down" />
-          <span className="num" style={{ color: 'var(--loss)' }}>
-            {error}
-          </span>
-        </div>
-      </Panel>
+      <div className="flex flex-col gap-5">
+        {runsPanel}
+        <Reveal index={1}>
+          <Panel title="Model Registry" live>
+            <div className="flex items-center gap-2">
+              <StatusDot status="down" />
+              <span className="num" style={{ color: 'var(--loss)' }}>
+                {error}
+              </span>
+            </div>
+          </Panel>
+        </Reveal>
+      </div>
     );
   }
 
   if (!cards) {
     return (
-      <Panel title="Model Registry" live>
-        <span className="micro animate-pulse" style={{ color: 'var(--cyan)' }}>
-          LOADING REGISTRY…
-        </span>
-      </Panel>
+      <div className="flex flex-col gap-5">
+        {runsPanel}
+        <Reveal index={1}>
+          <Panel title="Model Registry" live>
+            <span className="micro animate-pulse" style={{ color: 'var(--cyan)' }}>
+              LOADING REGISTRY…
+            </span>
+          </Panel>
+        </Reveal>
+      </div>
     );
   }
 
   if (cards.length === 0) {
     return (
-      <Panel title="Model Registry" live ticks>
-        <p className="num text-fg-1">
-          No checkpoints found in <span style={{ color: 'var(--cyan)' }}>checkpoints/</span>.
-        </p>
-      </Panel>
+      <div className="flex flex-col gap-5">
+        {runsPanel}
+        <Reveal index={1}>
+          <Panel title="Model Registry" live ticks>
+            <p className="num text-fg-1">
+              No checkpoints found in{' '}
+              <span style={{ color: 'var(--cyan)' }}>checkpoints/</span>. Promote a
+              training run above to add one.
+            </p>
+          </Panel>
+        </Reveal>
+      </div>
     );
   }
 
   return (
     <div className="flex flex-col gap-5">
-      <Reveal index={0}>
+      {runsPanel}
+      <Reveal index={1}>
         <Panel title={`Registry · ${cards.length} models`} live bodyClassName="p-0">
           <div className="overflow-x-auto">
             <table className="w-full border-collapse">
@@ -568,7 +906,7 @@ export default function Models() {
 
       <div className="grid grid-cols-1 gap-5 md:grid-cols-2 xl:grid-cols-3">
         {cards.map((card, i) => (
-          <Reveal key={card.id} index={i + 1}>
+          <Reveal key={card.id} index={i + 2}>
             <ModelCardView
               card={card}
               onDeleted={(id) =>

@@ -15,6 +15,7 @@ import type {
   OpponentBehavior,
   OpponentDsl,
   OpponentValidateResult,
+  PromoteBody,
   RecommendResult,
   RobotRecord,
   RobotSummary,
@@ -22,6 +23,7 @@ import type {
   TrainJobSummary,
   TrainOpponentsResult,
   TrainMode,
+  TrainRun,
   TrainStatus,
   Trajectory,
   ValidateResult,
@@ -102,6 +104,19 @@ export const api = {
   deleteModel: (id: string) =>
     request<{ deleted: boolean; id: string }>(`/api/models/${id}`, {
       method: 'DELETE',
+    }),
+
+  // Finished/running training runs eligible for promotion into the registry.
+  // One per job dir under config.JOBS_DIR.
+  listRuns: () => request<TrainRun[]>('/api/models/runs'),
+
+  // Promote a run's best.pt/final.pt into checkpoints/<slug(name)>.pt and get
+  // back the new ModelCard. 404 unknown job / missing <which>.pt; 422 bad
+  // 'which' or empty name; 409 if the slug already exists or is protected.
+  promoteRun: (body: PromoteBody) =>
+    request<ModelCard>('/api/models/promote', {
+      method: 'POST',
+      body: JSON.stringify(body),
     }),
 
   // ---- Saved robots --------------------------------------------------------
