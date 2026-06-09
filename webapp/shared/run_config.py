@@ -77,6 +77,19 @@ class TrainingConfig:
     # own chassis via ``extra_opponent_specs``). Empty by default => unset path
     # is byte-identical (no custom opponents).
     custom_opponents: list[dict] = field(default_factory=list)
+    # ADAPTIVE opponent weighting (PPO only, GATED). When False (default) the
+    # opponent mix is the static ``opponent_weights`` for the whole run — the
+    # path is byte-identical to today. When True, after each checkpoint eval the
+    # mix re-weights itself from the per-opponent greedy win-rates via
+    # :func:`webapp.shared.adaptive_weights.recompute_weights`, under strict
+    # guardrails (reserved zoo share, per-opponent cap, EMA smoothing) so it
+    # cannot starve the zoo / over-weight an unwinnable custom body. The knobs
+    # map onto :class:`adaptive_weights.AdaptiveCfg`.
+    adaptive_opponents: bool = False
+    adaptive_builtin_share: float = 0.55
+    adaptive_floor: float = 0.01
+    adaptive_cap_mult: float = 2.5
+    adaptive_ema: float = 0.5
 
     def to_dict(self) -> dict[str, Any]:
         """Serialise to a plain JSON-ready dict.
@@ -136,4 +149,9 @@ def load(path: str | Path) -> TrainingConfig:
         ),
         hyperparams=dict(data.get("hyperparams") or {}),
         custom_opponents=list(data.get("custom_opponents") or []),
+        adaptive_opponents=bool(data.get("adaptive_opponents", False)),
+        adaptive_builtin_share=float(data.get("adaptive_builtin_share", 0.55)),
+        adaptive_floor=float(data.get("adaptive_floor", 0.01)),
+        adaptive_cap_mult=float(data.get("adaptive_cap_mult", 2.5)),
+        adaptive_ema=float(data.get("adaptive_ema", 0.5)),
     )

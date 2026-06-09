@@ -51,18 +51,16 @@ def _launch_eval(snapshot: Path, cfg, step: int):
     job_dir = Path(cfg.job_dir)
     job_dir.mkdir(parents=True, exist_ok=True)
 
-    # The eval subprocess can only construct BUILT-IN zoo opponents; custom
-    # (user-authored) ids in the training mix would crash it (and its stderr is
-    # suppressed, so it would fail silently and never emit a checkpoint). Eval
-    # against the built-in opponents present in the mix — a stable benchmark —
-    # falling back to the standard seen zoo for a custom-only mix, or novamax
-    # when no mix is set (the CLI/default path).
-    from opponents import OPPONENT_REGISTRY
-
+    # Eval against EVERY opponent in the training mix — built-in zoo ids AND
+    # custom (user-authored) ids. ``eval_and_record`` resolves a custom id via
+    # opponents_store and fights it on its own chassis (skipping any id it can't
+    # resolve), so the per-opponent win-rates cover the full mix. Falls back to
+    # novamax when no mix is set (the CLI/default path).
     if cfg.opponent_weights:
-        opponents = [o for o in cfg.opponent_weights if o in OPPONENT_REGISTRY] or [
-            "dodger", "spinner", "rammer", "wedger", "novamax", "charger", "tracker",
-        ]
+        # Only opponents actually in the mix (positive weight) — a zero-weight id
+        # (e.g. held-out feinter/orbiter) isn't sampled in training, so don't
+        # spend eval wall-clock on it.
+        opponents = [o for o, w in cfg.opponent_weights.items() if w > 0] or ["novamax"]
     else:
         opponents = ["novamax"]
     hw = cfg.hardware_spec.to_dict() if cfg.hardware_spec is not None else None

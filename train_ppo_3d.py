@@ -331,6 +331,94 @@ def _append_progress_log(job_dir, **fields):
         print(f"  [progress] log append failed (ignored): {exc!r}", flush=True)
 
 
+def _latest_checkpoint_per_opponent(job_dir):
+    """Return ``(step, per_opponent_wr)`` from the LAST ``{"t":"checkpoint"}``
+    line in ``<job_dir>/progress.jsonl``, or ``None`` if there is no checkpoint
+    event yet / the file can't be read.
+
+    ``per_opponent_wr`` maps ``opponent_id -> win_rate`` (a float), flattened
+    from the eval's per-opponent metrics. Best-effort: any read/parse error
+    returns ``None`` (adaptive weighting simply skips this round).
+    """
+    if not job_dir:
+        return None
+    try:
+        import json as _json
+        path = pathlib.Path(job_dir) / "progress.jsonl"
+        if not path.exists():
+            return None
+        latest = None
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = _json.loads(line)
+            except _json.JSONDecodeError:
+                continue
+            if obj.get("t") == "checkpoint":
+                latest = obj
+        if latest is None:
+            return None
+        per_opp = (latest.get("eval") or {}).get("per_opponent") or {}
+        wr = {oid: float(m.get("wr", 0.0)) for oid, m in per_opp.items()
+              if isinstance(m, dict)}
+        return int(latest.get("step", 0)), wr
+    except Exception as exc:  # never break training on a telemetry read
+        print(f"  [adaptive] progress read failed (ignored): {exc!r}", flush=True)
+        return None
+
+
+def _maybe_adapt_weights(env, cfg, last_adapt_step):
+    """If ADAPTIVE weighting is on, fold the latest checkpoint eval's
+    per-opponent win-rates into the LIVE opponent mix.
+
+    Reads the newest ``{"t":"checkpoint"}`` event from the job's progress log;
+    if it is newer than ``last_adapt_step`` it recomputes the weights via
+    :func:`adaptive_weights.recompute_weights` (reserved zoo share + cap + EMA),
+    assigns them to ``env.unwrapped.opponent_weights`` (mutable; the env reads it
+    each episode), and prints a one-line summary. Returns the new
+    ``last_adapt_step``. Best-effort: never raises into the training loop.
+    """
+    if cfg is None or not getattr(cfg, "adaptive_opponents", False):
+        return last_adapt_step
+    try:
+        from webapp.shared.adaptive_weights import AdaptiveCfg, recompute_weights
+        from opponents import OPPONENT_IDS
+
+        latest = _latest_checkpoint_per_opponent(cfg.job_dir)
+        if latest is None:
+            return last_adapt_step
+        ev_step, per_opp_wr = latest
+        if ev_step <= last_adapt_step or not per_opp_wr:
+            # No new eval, or an eval with no per-opponent data — keep the mix.
+            return ev_step if ev_step > last_adapt_step else last_adapt_step
+
+        prev = env.unwrapped.opponent_weights
+        if not prev:
+            # No explicit mix on the env (pure default zoo) — nothing to adapt.
+            return ev_step
+
+        acfg = AdaptiveCfg(
+            builtin_share=cfg.adaptive_builtin_share,
+            floor=cfg.adaptive_floor,
+            cap_mult=cfg.adaptive_cap_mult,
+            ema=cfg.adaptive_ema,
+        )
+        new_w = recompute_weights(prev, per_opp_wr, set(OPPONENT_IDS), acfg)
+        env.unwrapped.opponent_weights = new_w
+
+        zoo_share = sum(w for o, w in new_w.items() if o in set(OPPONENT_IDS))
+        top = sorted(new_w.items(), key=lambda kv: kv[1], reverse=True)[:4]
+        top_str = "  ".join(f"{o}={w:.2f}" for o, w in top if w > 0)
+        print(f"  [adaptive] step {ev_step}: zoo_share={zoo_share:.2f}  "
+              f"top: {top_str}", flush=True)
+        return ev_step
+    except Exception as exc:  # never break training on an adaptive update
+        print(f"  [adaptive] update failed (ignored): {exc!r}", flush=True)
+        return last_adapt_step
+
+
 # ---------------------------------------------------------------------------
 # Training
 # ---------------------------------------------------------------------------
@@ -483,6 +571,10 @@ def train():
     # E1f periodic-hook state (only used when a job config is active).
     last_eval = 0
     eval_proc = None
+    # add/ui-local: ADAPTIVE opponent-weighting state — the step of the last
+    # checkpoint eval already folded into the live mix (0 == none yet). Inert
+    # unless cfg.adaptive_opponents is set.
+    last_adapt = 0
     update_idx = 0
     last_entropy = 0.0
     last_kl = 0.0
@@ -611,6 +703,12 @@ def train():
                 last_eval, eval_proc = checkpoint_hook.maybe_fire(
                     net, step, _RUN_CFG, last_eval, eval_proc,
                 )
+                # ADAPTIVE weighting: fold the latest COMPLETED checkpoint
+                # eval's per-opponent win-rates into the live opponent mix
+                # (mutating env.unwrapped.opponent_weights, which the env reads
+                # each episode). Gated on cfg.adaptive_opponents; the first eval
+                # leaves the static mix untouched (no win-rates -> no change).
+                last_adapt = _maybe_adapt_weights(env, _RUN_CFG, last_adapt)
             fps = step / max(1e-6, time.time() - t0)
             phase_tag = " [warmup]" if update_idx <= CRITIC_WARMUP_UPDATES else ""
             # E1f: surface the live entropy / fps / win-rate to the dashboard

@@ -250,6 +250,9 @@ def _build_config(req: dict[str, Any], job_dir: Path) -> TrainingConfig:
     if not isinstance(hyperparams, dict):
         raise JobError("hyperparams must be an object or null")
 
+    # ADAPTIVE opponent weighting (PPO only, default OFF => byte-identical path).
+    adaptive_opponents = bool(req.get("adaptive_opponents", False))
+
     return TrainingConfig(
         algo=algo,
         total_steps=total_steps,
@@ -264,6 +267,12 @@ def _build_config(req: dict[str, Any], job_dir: Path) -> TrainingConfig:
         start_mult=start_mult,
         hyperparams=dict(hyperparams),
         custom_opponents=custom_opponents,
+        adaptive_opponents=adaptive_opponents,
+        adaptive_builtin_share=float(
+            req.get("adaptive_builtin_share", 0.55)),
+        adaptive_floor=float(req.get("adaptive_floor", 0.01)),
+        adaptive_cap_mult=float(req.get("adaptive_cap_mult", 2.5)),
+        adaptive_ema=float(req.get("adaptive_ema", 0.5)),
     )
 
 

@@ -94,6 +94,84 @@ def _record_trajectory(env, model, max_steps: int = 600) -> dict:
     }
 
 
+def _resolve_custom_opponent(opp_id: str):
+    """Resolve a CUSTOM (out-of-zoo) opponent id to the env seams needed to
+    fight it: ``(extra_opponents, extra_opponent_specs)``.
+
+    Mirrors ``battle.py``'s custom path: the controller is built through the
+    shared ``opponents_store.build_controller`` factory (zoo|dsl branch in one
+    place) and the opponent's saved HardwareSpec is threaded so it fights on its
+    OWN chassis/motors. Returns ``None`` (with a logged warning) if the id can't
+    be resolved, so the caller SKIPS it rather than crashing.
+    """
+    from webapp.backend import opponents_store
+    from webapp.shared.hardware_spec import HardwareSpec
+
+    record = opponents_store.get_opponent(opp_id)
+    if record is None:
+        print(f"[eval_and_record] WARNING: custom opponent {opp_id!r} could "
+              f"not be resolved (not a zoo id, no saved record) — skipping",
+              file=sys.stderr, flush=True)
+        return None
+    behavior = opponents_store.normalize_behavior(record)
+    extra_opponents = {
+        opp_id: (lambda b=behavior: opponents_store.build_controller(b))
+    }
+    extra_specs = None
+    hw = record.get("hardware_spec")
+    if hw:
+        extra_specs = {opp_id: HardwareSpec.from_dict(hw)}
+    return extra_opponents, extra_specs
+
+
+def _run_eval_custom(model, opp_id, mult, n_eval, seed, build_env):
+    """Greedy eval of ``model`` vs a CUSTOM opponent, returning the SAME metrics
+    dict shape as ``scripts.eval_best.run_eval`` (so the per-opponent path is
+    identical to the built-in one). Returns ``None`` if the id can't resolve."""
+    from collections import Counter
+    import numpy as np
+
+    resolved = _resolve_custom_opponent(opp_id)
+    if resolved is None:
+        return None
+    extra_opponents, extra_specs = resolved
+
+    env = build_env(
+        gui=False, seed=seed,
+        novamax_torque_mult=mult, force_opponent_id=opp_id,
+        narek_reward=False,
+        extra_opponents=extra_opponents,
+        **({"extra_opponent_specs": extra_specs} if extra_specs else {}),
+    )
+    reasons: Counter = Counter()
+    ep_lens = []
+    try:
+        obs, _ = env.reset(seed=seed)
+        for ep in range(n_eval):
+            if ep > 0:
+                obs, _ = env.reset()
+            for k in range(600):
+                a = model.act_greedy(obs)
+                obs, _, terminated, truncated, info = env.step(a)
+                if terminated or truncated:
+                    break
+            ep_lens.append(k + 1)
+            reasons[info.get("termination_reason", "unknown")] += 1
+    finally:
+        env.close()
+
+    wins = reasons["win"]
+    timeouts = reasons["timeout"]
+    losses = n_eval - wins - timeouts
+    return {
+        "wins": wins, "losses": losses, "timeouts": timeouts,
+        "self_out": reasons["self_out"], "push_loss": reasons["push_loss"],
+        "mutual_out": reasons["mutual_out"],
+        "n": n_eval, "wr": wins / n_eval if n_eval else 0.0,
+        "mean_ep_len": float(np.mean(ep_lens)) if ep_lens else 0.0,
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if len(argv) != 1:
@@ -107,6 +185,7 @@ def main(argv: list[str] | None = None) -> int:
     from train_dqn_3d import DuelingQNet, build_env
     from scripts.eval_best import run_eval
     from webapp.shared.hardware_spec import HardwareSpec
+    from opponents import OPPONENT_REGISTRY
 
     snapshot = Path(args["snapshot"])
     job_dir = Path(args["job_dir"])
@@ -128,11 +207,21 @@ def main(argv: list[str] | None = None) -> int:
     model.eval()
 
     # --- metrics: aggregate run_eval over the opponent set ---
+    # Built-in zoo ids go through scripts.eval_best.run_eval as before; a CUSTOM
+    # (out-of-zoo) id is resolved via opponents_store and fought on its own
+    # chassis through ``_run_eval_custom`` (same metrics shape). A custom id that
+    # cannot be resolved is SKIPPED (logged), so eval never crashes on a stale
+    # mix.
     per_opp = {}
     tot_w = tot_l = tot_s = tot_n = 0
     len_sum = 0.0
     for opp in opponents:
-        r = run_eval(model, opp, mult, n_eval, seed)
+        if opp in OPPONENT_REGISTRY:
+            r = run_eval(model, opp, mult, n_eval, seed)
+        else:
+            r = _run_eval_custom(model, opp, mult, n_eval, seed, build_env)
+            if r is None:
+                continue  # unresolvable custom id — already warned
         per_opp[opp] = r
         tot_w += r["wins"]
         tot_l += r["losses"]
@@ -151,13 +240,32 @@ def main(argv: list[str] | None = None) -> int:
     }
 
     # --- trajectory: one greedy rollout vs the first opponent ---
+    # Prefer the first BUILT-IN opponent for the replay (a custom opponent's own
+    # chassis would also need its enemy spec threaded). If the mix is custom-only
+    # we record vs that custom opponent with its seams; if nothing resolved we
+    # fall back to novamax so a trajectory is always produced.
     traj_dir = job_dir / "trajectories"
     traj_dir.mkdir(parents=True, exist_ok=True)
     traj_path = traj_dir / f"{step}.json"
+    traj_opp = next((o for o in opponents if o in OPPONENT_REGISTRY), None)
+    traj_extra = None
+    traj_extra_specs = None
+    if traj_opp is None:
+        traj_opp = next((o for o in per_opp if o not in OPPONENT_REGISTRY), None)
+        if traj_opp is not None:
+            resolved = _resolve_custom_opponent(traj_opp)
+            if resolved is not None:
+                traj_extra, traj_extra_specs = resolved
+            else:
+                traj_opp = None
+        if traj_opp is None:
+            traj_opp = "novamax"
     env = build_env(
         gui=False, seed=seed,
-        novamax_torque_mult=mult, force_opponent_id=opponents[0],
+        novamax_torque_mult=mult, force_opponent_id=traj_opp,
         narek_reward=False,
+        **({"extra_opponents": traj_extra} if traj_extra else {}),
+        **({"extra_opponent_specs": traj_extra_specs} if traj_extra_specs else {}),
         **({"hardware_spec": hw_spec} if hw_spec is not None else {}),
     )
     try:
