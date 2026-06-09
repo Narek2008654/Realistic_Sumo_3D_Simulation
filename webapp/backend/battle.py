@@ -169,10 +169,11 @@ def _record_match(env_u, net_a, net_b, max_steps: int = 600):
     import pybullet as p
     from sumo_env import (
         DISCRETE_ACTION_MAP, SUBSTEPS_PER_STEP, FALL_Z, STEP_DT_SECONDS,
+        CONTACT_RECENT_STEPS,
     )
     from scripts.agent_vs_agent import fresh_state, robot_obs, drive
 
-    contact_window = 10
+    contact_window = CONTACT_RECENT_STEPS  # single source of truth (sumo_env)
     stA, stB = fresh_state(), fresh_state()
     obsA = robot_obs(env_u, env_u.robot_id, stA, 0.0, 0.0, first=True)
     obsB = robot_obs(env_u, env_u.enemy_id, stB, 0.0, 0.0, first=True)

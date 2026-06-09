@@ -34,7 +34,7 @@ from obs_stack import DEFAULT_STACK_K
 from sumo_env import (
     DISCRETE_ACTION_MAP, SUBSTEPS_PER_STEP, WHEEL_OMEGA_FWD, WHEEL_MAX_TORQUE,
     FORWARD_SIGN, FALL_Z, ENGAGEMENT_FRONT_THRESHOLD, ENEMY_RGBA,
-    STEP_DT_SECONDS,
+    STEP_DT_SECONDS, CONTACT_RECENT_STEPS,
 )
 
 # env obs-state attributes swapped per body so the env's own obs methods
@@ -123,8 +123,8 @@ def respawn_enemy_as_agent_robot(env_u):
     env_u._enemy_right_idx = joints["right_wheel_joint"]
 
 
-def play_match(env_u, net_agent, net_enemy, max_steps=600, contact_window=10,
-               gui=False):
+def play_match(env_u, net_agent, net_enemy, max_steps=600,
+               contact_window=CONTACT_RECENT_STEPS, gui=False):
     """Returns (winner, loser_exit) where winner in {A,B,draw,timeout,quit}
     and loser_exit in {self_out, push, ""}. A loss with no contact in the last
     `contact_window` steps is a self-out; otherwise the opponent pushed.

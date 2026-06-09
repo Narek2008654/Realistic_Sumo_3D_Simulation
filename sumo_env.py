@@ -313,8 +313,16 @@ REWARD_ACTION_CHANGE_PENALTY = -0.002
 # Small per-step cost: -0.005 * 600 = -3 max additional bias (was -300).
 REWARD_TIME = -0.005
 # Self-out vs push-loss vs mutual-out are distinguished in
-# info["termination_reason"] AND now in the reward magnitude itself.
-CONTACT_RECENT_STEPS = 2
+# info["termination_reason"] AND in the reward magnitude itself. The window must
+# OUTLAST an opponent's pre-falloff disengage: heavy bots ram the agent to the
+# brink then back off (their own edge-recovery) several steps before it finally
+# slides off, so the old 2-step (~83 ms) window logged those clear pushes as
+# self-outs (~34% of zoo self-outs, up to 70% vs rammer) and over-penalised
+# training (lose_self vs lose_push). ~12 steps (~0.5 s) attributes them
+# correctly; genuine no-contact self-outs (no contact all episode) still read
+# self_out. Single source of truth — battle.py / agent_vs_agent.py import this
+# instead of hardcoding their own contact window.
+CONTACT_RECENT_STEPS = 12
 
 # Wedge-engagement reward (Run 7 — outward Δr signal).
 #
